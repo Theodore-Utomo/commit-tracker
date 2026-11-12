@@ -1,0 +1,35 @@
+{
+  "name": "commit-tracker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "See GitHub commits across all branches, not just the default branch.",
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "postinstall": "wxt prepare",
+    "test": "vitest",
+    "test:e2e": "playwright test",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.65.0",
+    "@preact/preset-vite": "^2.10.6",
+    "eslint": "^10.14.0",
+    "fake-indexeddb": "^6.2.8",
+    "prettier": "^3.10.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.2",
+    "vite": "^8.1.5",
+    "vitest": "^5.1.0",
+    "web-ext": "^10.5.0",
+    "wxt": "^0.21.3"
+  },
+  "dependencies": {
+    "idb": "^8.0.4",
+    "preact": "^11.2.0"
+  }
+}
