@@ -18,9 +18,14 @@ Ship top to bottom. A sequence starts only after every sequence it depends on is
 ## Shared decisions
 
 - The fetch window is the same year the grid draws: from the Sunday 52 weeks before the current week, through the Saturday of the current week. A full refetch does not walk a user's entire history.
-- One message, `GET_CONTRIBUTIONS`, carries the whole feature. Detect-and-auth returns `{ viewerLogin }`. The branch-commits phase returns `Contributions` when the profile is the viewer and keeps `{ viewerLogin }` otherwise. The privacy phase removes the `{ viewerLogin }` shape. Do not add a second message for the same request.
+- One message, `GET_CONTRIBUTIONS`, carries the whole feature. Detect-and-auth returns `{ viewerLogin }`. The branch-commits phase returns `Contributions` when the profile is the viewer and keeps `{ viewerLogin }` otherwise. The privacy phase removes the `{ viewerLogin }` shape. Do not add a second message for the same request. The only other messages are `CLEAR_CACHE` (cache phase) and `OPEN_OPTIONS` (graph-interactions phase), because a content script cannot open the options page itself.
+- The message handler lives in `src/services/handle-message.ts`, not in `background.ts`, so Vitest can import it. `background.ts` only constructs dependencies and registers listeners. Listeners call `sendResponse` and `return true`; they do not rely on returning a promise.
 - Failures are `{ ok: false, error, resetAt? }`. `resetAt` is set only for `RATE_LIMITED`. The worker does not throw across the message boundary.
-- Stopping early because fewer than 200 rate-limit points remain, after some commits were collected, is a success with `partial: true`. `RATE_LIMITED` is only for when the first request cannot proceed.
+- Stopping early because fewer than 200 rate-limit points remain, after some commits were collected, is a success with `partial: true`. `RATE_LIMITED` is only for when the first request cannot proceed. HTTP 403 or 429 responses that carry rate-limit headers are `RATE_LIMITED` too, not `NETWORK`.
+- A GraphQL response with both `data` and `errors` is not a failure of the whole request. A repository that comes back `null` or `FORBIDDEN` (for example, an organization behind SAML single sign-on) is skipped and the fetch continues.
+- A login is valid only if it matches GitHub's username pattern, `^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$`. The page and the worker both check it. Search strings are built from the `login` GitHub returns, never from the URL text.
+- Long fetches keep the service worker alive with a `keepalive` port that the content script pings every 20 seconds. An open port that sends nothing does not keep a Manifest V3 worker alive.
+- Every result only counts commits whose local day is inside the grid year. Commits outside it are dropped before `aggregateByDay`, on a fresh fetch and on a cache hit.
 - Other people's profiles use `publicOnly` until a later, unwritten phase turns on `publicPlusCounts`. The core policies for all three modes exist earlier so the tests can lock the stripping behavior. The resolver must not select `publicPlusCounts` in the phases written here.
 - Private details are removed in the worker before the response is built. The content script never calls `api.github.com` and never reads the token.
 - Cache key is viewer login, profile login, and mode, plus schema version `1`. An `owner` entry is never served for another mode or viewer.
@@ -44,3 +49,4 @@ Ship top to bottom. A sequence starts only after every sequence it depends on is
 
 - **plan-simplifier**: Cut three out-of-scope lines that repeated the sequence table and the public-only decision. Left the Firefox and permissions notes, because those are the boundaries an implementer would otherwise widen.
 - **plan-scope-guard**: No material findings. Four sequences, with the authored work split so no table is a single ten-phase plan. Device login stays unwritten.
+- **plan-review (2026-11-12)**: Two review passes before implementation. Added shared decisions for the handler module, `sendResponse`, partial GraphQL errors, 403/429 rate limits, login validation, the pinged keepalive port, the grid-year filter, and `OPEN_OPTIONS`. Phase files carry the details.

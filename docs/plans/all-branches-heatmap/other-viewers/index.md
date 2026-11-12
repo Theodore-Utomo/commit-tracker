@@ -10,7 +10,7 @@ Let the extension open someone else's profile without leaking private work, then
 | --- | --- | --- | --- | --- |
 | 1 | Pending | `261112-P01-privacy-modes.md` | — | Other profiles are public-only. The viewer's own profile stays owner mode. |
 | 2 | Pending | `261112-P02-graph-interactions.md` | 1 | Toggle GitHub's graph, open a day, and show token and rate-limit errors. |
-| 3 | — | _(not written)_ | 1 | If a manual check proves `restrictedContributionsCount`, select `publicPlusCounts` when that count is non-zero. |
+| 3 | — | _(not written)_ | 1 | If a manual check proves `restrictedContributionsCount`, select `publicPlusCounts` when that count is non-zero. Before the response is built, reduce each private `CountOnly` to a per-day count: no SHA and no timestamp reach the content script or the cache. |
 
 ## Shared decisions
 
