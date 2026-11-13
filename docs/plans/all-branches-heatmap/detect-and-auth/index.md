@@ -14,7 +14,7 @@ Notice a GitHub profile, store a token, and prove the page can ask the service w
 ## Shared decisions
 
 - `src/entrypoints/content.ts` is removed in phase 1. The only content script is `github-profile.content`.
-- Phase 2 sends `GET_CONTRIBUTIONS` as soon as the graph is in view, and the success payload is `{ viewerLogin: string }`. The owner-graph sequence replaces that payload and replaces the automatic send with a prompt.
+- Phase 2 sends `GET_CONTRIBUTIONS` as soon as the graph is in view. The heatmap phase replaces the automatic send with a prompt.
 
 ## Goal acceptance criteria
 

@@ -27,9 +27,10 @@ Ship top to bottom. A sequence starts only after every sequence it depends on is
 - Long fetches keep the service worker alive with a `keepalive` port that the content script pings every 20 seconds. An open port that sends nothing does not keep a Manifest V3 worker alive.
 - Every result only counts commits whose local day is inside the grid year. Commits outside it are dropped before `aggregateByDay`, on a fresh fetch and on a cache hit.
 - Other people's profiles use `publicOnly` until a later, unwritten phase turns on `publicPlusCounts`. The core policies for all three modes exist earlier so the tests can lock the stripping behavior. The resolver must not select `publicPlusCounts` in the phases written here.
-- Private details are removed in the worker before the response is built. The content script never calls `api.github.com` and never reads the token. It imports display preferences from the token-free `src/services/preferences.ts`, never from `src/services/settings.ts`.
-- Cache key is viewer login, profile login, and mode, plus schema version `1`. An `owner` entry is never served for another mode or viewer.
-- Commit messages and repository names are Preact text, never HTML.
+- Private details are removed in the worker before the response is built. The content script never calls `api.github.com` and never reads the token. It reads display preferences from the token-free `src/storage/preferences.ts` and never imports `src/services/`; an ESLint rule enforces that from the heatmap phase on.
+- Cache key is viewer login, profile login, and mode, plus schema version `1`. An `owner` entry is never served for another mode or viewer. In-flight requests are shared only under the same viewer, profile, and mode, and a token change drops them.
+- Day aggregation, the grid-year filter, and mode resolution live in `src/core/`. The pipeline reads policy fields and never branches on a mode name.
+- [Quick-reference invariants](../../reference/quick-reference.md) 1–10 apply to every phase.
 - The extension permissions stay `storage`, `https://github.com/*`, and `https://api.github.com/*`.
 - `pnpm zip` already exists. Publishing to the Chrome Web Store is not a phase.
 
@@ -49,4 +50,5 @@ Ship top to bottom. A sequence starts only after every sequence it depends on is
 
 - **plan-simplifier**: Cut three out-of-scope lines that repeated the sequence table and the public-only decision. Left the Firefox and permissions notes, because those are the boundaries an implementer would otherwise widen.
 - **plan-scope-guard**: No material findings. Four sequences, with the authored work split so no table is a single ten-phase plan. Device login stays unwritten.
+- **Agent rerun (2026-11-12)**: All four `.cursor/agents/` plan passes were rerun over the whole goal after the ad-hoc reviews. Simplifier: no blockers. Scope guard: no splits. Detect-and-auth P02 (18 files) and owner-graph P02 (16) are full, and new findings go to follow-up phases. Extra commit emails moved from branch commits to merged PRs. Scrutinizer: missing tests, clock injection, `NOT_FOUND` mapping, retry, and `open_in_tab` added. Compliance audit: one blocker, the in-flight map keyed by profile only, now keyed by viewer, profile, and mode. Preferences moved to `src/storage/`. The grid filter and `resolveMode` moved to core. The pipeline reads policy fields. One item awaits a person: the cache phase's Human Feedback Requested.
 - **plan-review (2026-11-12)**: Two review passes before implementation. Added shared decisions for the handler module, `sendResponse`, partial GraphQL errors, 403/429 rate limits, login validation, the pinged keepalive port, the grid-year filter, and `OPEN_OPTIONS`. Phase files carry the details.

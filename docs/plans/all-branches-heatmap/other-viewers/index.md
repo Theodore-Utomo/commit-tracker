@@ -14,7 +14,6 @@ Let the extension open someone else's profile without leaking private work, then
 
 ## Shared decisions
 
-- `policyFor('publicPlusCounts')` is already tested in the core library. This sequence does not select that mode.
 - A day list shows only what the worker already returned. It does not fetch more when the day is clicked.
 
 ## Goal acceptance criteria
