@@ -27,7 +27,7 @@ Ship top to bottom. A sequence starts only after every sequence it depends on is
 - Long fetches keep the service worker alive with a `keepalive` port that the content script pings every 20 seconds. An open port that sends nothing does not keep a Manifest V3 worker alive.
 - Every result only counts commits whose local day is inside the grid year. Commits outside it are dropped before `aggregateByDay`, on a fresh fetch and on a cache hit.
 - Other people's profiles use `publicOnly` until a later, unwritten phase turns on `publicPlusCounts`. The core policies for all three modes exist earlier so the tests can lock the stripping behavior. The resolver must not select `publicPlusCounts` in the phases written here.
-- Private details are removed in the worker before the response is built. The content script never calls `api.github.com` and never reads the token.
+- Private details are removed in the worker before the response is built. The content script never calls `api.github.com` and never reads the token. It imports display preferences from the token-free `src/services/preferences.ts`, never from `src/services/settings.ts`.
 - Cache key is viewer login, profile login, and mode, plus schema version `1`. An `owner` entry is never served for another mode or viewer.
 - Commit messages and repository names are Preact text, never HTML.
 - The extension permissions stay `storage`, `https://github.com/*`, and `https://api.github.com/*`.

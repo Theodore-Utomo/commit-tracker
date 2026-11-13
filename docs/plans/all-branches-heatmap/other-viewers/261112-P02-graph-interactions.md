@@ -37,7 +37,7 @@ One new message, `{ type: 'OPEN_OPTIONS' }`. A content script cannot call `runti
 | Test file | Behaviors to check |
 | --- | --- |
 | `tests/unit/ui/day-detail.test.ts` | A full commit contributes its message and `owner/name`; a `CountOnly` value contributes a private-commits line and neither a message nor a repository; an empty day returns `No commits` |
-| `tests/unit/services/settings.test.ts` | Unset `getShowAllBranches` returns true; `setShowAllBranches(false)` then get returns false |
+| `tests/unit/services/preferences.test.ts` | Unset `getShowAllBranches` returns true; `setShowAllBranches(false)` then get returns false |
 | `tests/unit/services/handle-message.test.ts` | `OPEN_OPTIONS` calls the injected `openOptionsPage` once and returns `{ opened: true }`; a rejection returns `UNKNOWN` |
 
 The test imports `dayLines` from `DayDetail.tsx` and does not render the component.
@@ -61,7 +61,7 @@ src/
 │   └── protocol.ts                                 (update)
 │       └── + OPEN_OPTIONS
 ├── services/
-│   ├── settings.ts                                 (update)
+│   ├── preferences.ts                              (update)
 │   │   └── + getShowAllBranches, setShowAllBranches
 │   └── handle-message.ts                           (update)
 │       └── + handleOpenOptions
@@ -78,12 +78,12 @@ tests/
 └── unit/
     ├── services/
     │   ├── handle-message.test.ts                  (update)
-    │   └── settings.test.ts                        (update)
+    │   └── preferences.test.ts                     (update)
     └── ui/
         └── day-detail.test.ts                      (create)
 ```
 
-`showAllBranches` defaults to true when unset. `Toggle.tsx` receives the current value and `onToggle` and does not import `src/services/` or `src/dom/`. `index.tsx` calls `findContributionGraph` and settings. `DayBucket.commits` becomes `(Commit | CountOnly)[] | undefined` in `src/core/types.ts`. `dayLines` emits one line per full commit and, when any `CountOnly` is present, one line `<n> private commits`. `DayDetail` renders those strings as Preact text. Native graph nodes stay in the DOM.
+`showAllBranches` defaults to true when unset. `Toggle.tsx` receives the current value and `onToggle` and does not import `src/services/` or `src/dom/`. `index.tsx` calls `findContributionGraph` and `src/services/preferences.ts`. It never imports `src/services/settings.ts`. `DayBucket.commits` becomes `(Commit | CountOnly)[] | undefined` in `src/core/types.ts`. `dayLines` emits one line per full commit and, when any `CountOnly` is present, one line `<n> private commits`. `DayDetail` renders those strings as Preact text. Native graph nodes stay in the DOM.
 
 ## Task Order
 
@@ -96,4 +96,4 @@ tests/
 - **plan-scope-guard**: No material findings. Two tasks. Toggle, day detail, and errors are one build-order step.
 - **plan-scrutinizer**: Named the sentence for every `ErrorCode`, including the options link for `NO_TOKEN`. A missing graph does not throw. `DayBucket.commits` can hold `CountOnly` values.
 - **plan-compliance-audit**: No material findings. `Toggle.tsx` does not import services or DOM helpers.
-- **plan-review (2026-11-12)**: The `NO_TOKEN` "link to the options page" could not work from a content script. It is now a button that sends a new `OPEN_OPTIONS` message, and the worker calls `openOptionsPage()`. `UNAUTHORIZED` gets the same button.
+- **plan-review (2026-11-12)**: The `NO_TOKEN` "link to the options page" could not work from a content script. It is now a button that sends a new `OPEN_OPTIONS` message, and the worker calls `openOptionsPage()`. `UNAUTHORIZED` gets the same button. `showAllBranches` lives in the token-free `preferences.ts`, not `settings.ts`.
