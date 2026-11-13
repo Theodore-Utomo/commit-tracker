@@ -13,6 +13,7 @@ Opening someone else's profile should show their public commits across branches,
 - When the logins differ, the mode is `publicOnly`. Private repositories are not listed and cannot appear in `days`.
 - `restrictedContributionsCount` is requested and then ignored. A non-zero value still selects `publicOnly`.
 - A cache entry written in `owner` mode is not returned for `publicOnly`, even for the same profile login.
+- A `publicOnly` result is cached through the same path, under its own key `{ viewerLogin, profileLogin, mode: 'publicOnly', schemaVersion: 1 }`. A `partial: true` result is still not written.
 - The heatmap heading is still `All commits across branches`.
 - `pnpm test -- --run` passes, including the new cases in Unit Tests.
 
@@ -31,7 +32,7 @@ No new message. `Contributions.mode` is `owner` or `publicOnly`. The `{ viewerLo
 | Test file | Behaviors to check |
 | --- | --- |
 | `tests/unit/services/privacy-mode.test.ts` | Equal logins return `owner`; different logins return `publicOnly` even when `restrictedContributionsCount` is greater than 0 |
-| `tests/unit/services/contributions.test.ts` | A different login calls `listPublicRepos` and not `listOwnerRepos`; the author id is the profile user's id; `Octocat` versus viewer `octocat` still calls `listOwnerRepos`; saved emails are not passed; the merged-PR query uses `user.login` from `getViewerAndUser`, not the request's `login`; the public merged-PR query contains `is:public` and a private pull-request commit is absent from `days`; an owner merged-PR query does not contain `is:public`, and a private owner pull-request commit remains in `days` |
+| `tests/unit/services/contributions.test.ts` | A different login calls `listPublicRepos` and not `listOwnerRepos`; the author id is the profile user's id; `Octocat` versus viewer `octocat` still calls `listOwnerRepos`; saved emails are not passed; the merged-PR query uses `user.login` from `getViewerAndUser`, not the request's `login`; the public merged-PR query contains `is:public` and a private pull-request commit is absent from `days`; an owner merged-PR query does not contain `is:public`, and a private owner pull-request commit remains in `days`; a `publicOnly` result calls `put` with `mode: 'publicOnly'`, and a stored `owner` entry for the same profile is not read |
 | `tests/unit/services/github/mappers.test.ts` | A contributed-to node maps to a `RepoRef`; `isFork: true` is dropped |
 
 ## File Map
@@ -79,4 +80,4 @@ tests/
 - **plan-scope-guard**: No material findings. Turning on `publicPlusCounts` stays unwritten.
 - **plan-scrutinizer**: Other profiles use the profile user's id, not the viewer's. Merged pull requests add `is:public` only in `publicOnly`, and saved emails are not sent. Login comparison ignores case. A second pass kept `is:public` off the owner's search so private squash-merged commits stay.
 - **plan-compliance-audit**: No material findings. `publicPlusCounts` is still not selected.
-- **plan-review (2026-11-12)**: The public search uses `user.login` from GitHub, not the URL text. `since` on a hit follows the cache phase's 14-day overlap. The grid-year filter and the forbidden-repository skip apply here too.
+- **plan-review (2026-11-12)**: The public search uses `user.login` from GitHub, not the URL text. `since` on a hit follows the cache phase's 14-day overlap. The grid-year filter and the forbidden-repository skip apply here too. A later pass made `publicOnly` caching explicit: it is written under its own mode key, since the cache phase only described `owner`.
