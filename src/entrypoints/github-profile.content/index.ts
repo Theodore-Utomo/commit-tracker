@@ -1,4 +1,5 @@
 import { findContributionGraph, getProfileLogin } from '../../dom/github-page';
+import { sendMessage } from '../../messaging/client';
 
 export default defineContentScript({
   matches: ['https://github.com/*'],
@@ -23,6 +24,15 @@ function setup(): () => void {
 
   let intersection: IntersectionObserver | undefined;
   let logged = false;
+  let active = true;
+
+  const askWorker = async (): Promise<void> => {
+    const response = await sendMessage({ type: 'GET_CONTRIBUTIONS', login });
+    if (!active) {
+      return;
+    }
+    console.log(response.ok ? response.data.viewerLogin : response.error);
+  };
 
   const watchGraph = (graph: Element): void => {
     mutation.disconnect();
@@ -37,6 +47,7 @@ function setup(): () => void {
         logged = true;
         intersection?.disconnect();
         console.log(login);
+        void askWorker();
       },
       { threshold: 0.5 },
     );
@@ -58,6 +69,7 @@ function setup(): () => void {
   }
 
   return () => {
+    active = false;
     mutation.disconnect();
     intersection?.disconnect();
   };

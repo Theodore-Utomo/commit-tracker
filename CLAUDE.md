@@ -178,7 +178,7 @@ Never commit a token. Never put one in test fixtures.
 ```
 src/
   entrypoints/
-    background.ts            # Service worker: message router only
+    background.ts            # Service worker: constructs deps, registers listeners; no logic
     github-profile.content/  # Content script on github.com profile pages
       index.tsx              # Bootstrap: page detection, observers, mounts UI
       style.css
@@ -201,6 +201,7 @@ src/
     cache/
       store.ts               # CacheStore interface + IndexedDB implementation
     settings.ts              # Typed wrapper over chrome.storage
+    handle-message.ts        # Per-message handlers, testable without Chrome
     contributions.ts         # Orchestrates one GET_CONTRIBUTIONS request
     concurrency.ts           # Small promise pool
   messaging/
@@ -280,12 +281,12 @@ type Request =
 
 type Response =
   | { ok: true; data: Contributions }
-  | { ok: false; error: ErrorCode };
+  | { ok: false; error: ErrorCode; resetAt?: string }; // resetAt: ISO, only with RATE_LIMITED
 
 type ErrorCode = 'NO_TOKEN' | 'UNAUTHORIZED' | 'RATE_LIMITED' | 'NOT_FOUND' | 'NETWORK' | 'UNKNOWN';
 ```
 
-The worker's `onMessage` handler is a single `switch` on `type`, so TypeScript checks every case. Don't add untyped messages.
+The worker's `onMessage` listener in `background.ts` is a single `switch` on `type`, so TypeScript checks every case. It ignores messages whose `sender.id` is not the extension's own, calls the handler from `services/handle-message.ts`, passes the result to `sendResponse`, and returns `true`. It does not return a promise: WXT 0.20+ has no polyfill, so a returned promise depends on native Chrome support. A `type` it doesn't handle returns `false`. Don't add untyped messages. On the page side, `messaging/client.ts`'s `sendMessage` never rejects; a failed send or a missing reply becomes `UNKNOWN`.
 
 **Strategy pattern for privacy.**
 Each privacy mode is a policy object with the same interface:
