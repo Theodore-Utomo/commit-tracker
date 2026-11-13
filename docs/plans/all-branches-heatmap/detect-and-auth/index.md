@@ -8,7 +8,7 @@ Notice a GitHub profile, store a token, and prove the page can ask the service w
 
 | Order | Status | Plan | Depends on | Purpose |
 | --- | --- | --- | --- | --- |
-| 1 | Pending | `261112-P01-profile-detection.md` | — | Log when a profile's contribution graph scrolls into view. |
+| 1 | In Progress | `261112-P01-profile-detection.md` | — | Log when a profile's contribution graph scrolls into view. |
 | 2 | Pending | `261112-P02-token-and-viewer.md` | 1 | Save a token and return the viewer's login across the message boundary. |
 
 ## Shared decisions

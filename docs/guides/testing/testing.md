@@ -23,7 +23,7 @@ pnpm exec vitest run tests/unit/core/dedupe.test.ts
 
 ## Where tests live
 
-- `tests/unit/` — Vitest. Mirror `src/core/` and `src/services/`.
+- `tests/unit/` — Vitest. Mirror `src/core/`, `src/services/`, and the pure helpers in `src/dom/`. `src/dom/` tests pass a `querySelector` stub and never use `document`.
 - `tests/e2e/` — Playwright against the built extension.
 - `tests/fixtures/` — recorded GraphQL responses. Tokens and private data removed before they are committed.
 
@@ -52,3 +52,12 @@ Playwright loads the built extension, opens a public profile, scrolls to the con
 1. `pnpm dev`, or `pnpm build` and load `.output/chrome-mv3` at `chrome://extensions`.
 2. Open a GitHub profile and scroll until the contribution graph is in view.
 3. For a privacy change, check the viewer's own profile and one other profile. Confirm the other profile shows no private repository names or commit messages.
+
+### Profile detection
+
+With DevTools open on github.com:
+
+1. Open `https://github.com/<user>` and scroll until the contribution graph is at least half visible. The login logs exactly once. Scrolling away and back logs nothing more.
+2. Open a repository page (`/<user>/<repo>`) and denylisted routes such as `/settings`, `/trending`, and `/orgs/<org>`. Nothing logs, and the extension throws no errors.
+3. From one profile, navigate to another inside GitHub (for example from Followers) before scrolling to the first graph. Only the second login logs.
+4. Open a page with no contribution graph, such as an organization overview. The page is unchanged, nothing logs, and there are no uncaught errors.

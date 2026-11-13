@@ -187,6 +187,7 @@ src/
       main.tsx
     popup/                   # Small status popup (optional)
   core/                      # Pure TypeScript. No chrome.*, no fetch, no DOM.
+    login.ts                 # LOGIN_PATTERN, shared by dom/ and services/
     types.ts                 # Commit, DayBucket, PrivacyMode, Contributions
     dedupe.ts
     privacy.ts               # Privacy policies (strategy pattern)
