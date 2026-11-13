@@ -12,7 +12,7 @@ Count the signed-in viewer's commits on every branch, draw the heatmap, add squa
 | 2 | Pending | `261112-P02-branch-commits.md` | 1 | Fetch the viewer's branch commits and log the total. |
 | 3 | Pending | `261112-P03-heatmap.md` | 2 | Draw the year heatmap, gated by the prompt. First visible UI. |
 | 4 | Pending | `261112-P04-merged-prs.md` | 2 | Add commits that survived only as a merged pull request, and extra commit emails. |
-| 5 | Pending | `261112-P05-cache.md` | 3, 4 | Cache by viewer, profile, and mode, and refetch only a recent window. Has a Human Feedback item. |
+| 5 | Pending | `261112-P05-cache.md` | 3, 4 | Cache by viewer, profile, and mode, and refetch only the last 14 days (approved). |
 
 ## Shared decisions
 
