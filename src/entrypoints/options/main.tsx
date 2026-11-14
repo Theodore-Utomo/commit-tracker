@@ -1,14 +1,26 @@
 import { render } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { hasToken, setToken } from '../../services/settings';
+import { getAlwaysShow, setAlwaysShow } from '../../storage/preferences';
 
 function Options() {
   const [saved, setSaved] = useState(false);
   const [status, setStatus] = useState('');
+  const [alwaysShow, setAlwaysShowChecked] = useState(false);
 
   useEffect(() => {
     void hasToken().then(setSaved);
+    void getAlwaysShow().then(setAlwaysShowChecked);
   }, []);
+
+  async function onAlwaysShow(checked: boolean): Promise<void> {
+    setAlwaysShowChecked(checked);
+    try {
+      await setAlwaysShow(checked);
+    } catch {
+      setAlwaysShowChecked(!checked);
+    }
+  }
 
   async function onSubmit(event: SubmitEvent): Promise<void> {
     event.preventDefault();
@@ -40,6 +52,14 @@ function Options() {
       </form>
       {saved && <p>A token is saved.</p>}
       {status && <p role="status">{status}</p>}
+      <label>
+        <input
+          type="checkbox"
+          checked={alwaysShow}
+          onChange={(event) => void onAlwaysShow(event.currentTarget.checked)}
+        />
+        Always show
+      </label>
     </main>
   );
 }

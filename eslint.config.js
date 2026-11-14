@@ -15,4 +15,20 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   autoImports,
+  {
+    files: ['src/entrypoints/github-profile.content/**', 'src/ui/**', 'src/dom/**'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/services/**'],
+              message: 'Import display preferences from src/storage/preferences.ts. src/services/ is for the service worker.',
+            },
+          ],
+        },
+      ],
+    },
+  },
 );
