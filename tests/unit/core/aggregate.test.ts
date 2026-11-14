@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { aggregateByDay, inGridYear, isCountOnly, localDay } from '../../../src/core/aggregate';
+import { aggregateByDay, inGridYear, isCountOnly, localDay, startOfLocalDayIso } from '../../../src/core/aggregate';
 import { gridDays } from '../../../src/core/grid';
 import { commit, countOnly, privateRepo } from './fixtures';
 
@@ -133,5 +133,35 @@ describe('aggregateByDay', () => {
     const copy = structuredClone(items);
     aggregateByDay(items, 'UTC');
     expect(items).toEqual(copy);
+  });
+});
+
+describe('startOfLocalDayIso', () => {
+  it.each([
+    ['2023-01-08', 'America/New_York', '2023-01-08T00:00:00-05:00'],
+    ['2023-07-09', 'America/New_York', '2023-07-09T00:00:00-04:00'],
+    ['2023-01-08', 'UTC', '2023-01-08T00:00:00+00:00'],
+    ['2023-01-08', 'Asia/Kolkata', '2023-01-08T00:00:00+05:30'],
+    ['2023-01-08', 'Asia/Kathmandu', '2023-01-08T00:00:00+05:45'],
+    ['2023-01-08', 'Pacific/Kiritimati', '2023-01-08T00:00:00+14:00'],
+    ['2023-01-08', 'Pacific/Pago_Pago', '2023-01-08T00:00:00-11:00'],
+    ['2024-03-31', 'Europe/London', '2024-03-31T00:00:00+00:00'],
+  ])('gives the start of %s in %s', (day, zone, expected) => {
+    expect(startOfLocalDayIso(day, zone)).toBe(expected);
+  });
+
+  it('gives the first real local time when clocks skip midnight', () => {
+    // Chile springs forward from 00:00 to 01:00 on 2024-09-08.
+    expect(startOfLocalDayIso('2024-09-08', 'America/Santiago')).toBe('2024-09-08T01:00:00-03:00');
+  });
+
+  it('names the instant that starts the day, so a minute earlier is the previous day', () => {
+    for (const zone of ['America/New_York', 'Asia/Kathmandu', 'America/Santiago']) {
+      const start = Date.parse(startOfLocalDayIso('2024-09-08', zone));
+      const day = (ms: number) =>
+        new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(ms);
+      expect(day(start)).toBe('2024-09-08');
+      expect(day(start - 60_000)).toBe('2024-09-07');
+    }
   });
 });

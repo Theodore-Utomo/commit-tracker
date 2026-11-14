@@ -255,11 +255,16 @@ The page (GitHub's DOM) is untrusted territory: other extensions and page script
 `services/` depends on interfaces, not implementations:
 
 ```ts
+// As built so far (services/github/client.ts). Every method takes the token and returns a
+// GitHubResult: { ok: true, data } or a GitHubFailure carrying an ErrorCode. Paged methods
+// return Page<T> = { items, truncated, failure? } and record each reply's rateLimit in a
+// RateBudget shared across the request; they stop paging once it reports fewer than 200 points.
 interface GitHubClient {
-  getViewerAndUser(login: string): Promise<ViewerAndUser>;
-  listRepos(login: string, mode: PrivacyMode): Promise<RepoRef[]>;
-  getBranchCommits(repo: RepoRef, author: AuthorFilter, since?: string): Promise<RawCommit[]>;
-  getMergedPrCommits(login: string, since?: string): Promise<RawCommit[]>;
+  getViewer(token: string): Promise<GitHubResult<Viewer>>;
+  listOwnerRepos(token: string, since: string, budget: RateBudget): Promise<GitHubResult<Page<RepoRef>>>;
+  getBranchCommits(token: string, repo: RepoRef, author: { id: string }, since: string, budget: RateBudget): Promise<GitHubResult<Page<Commit>>>;
+  // Later phases: getMergedPrCommits (merged PRs), getViewerAndUser replacing getViewer and
+  // listPublicRepos (privacy modes).
 }
 
 interface CacheStore {
@@ -280,7 +285,7 @@ type Request =
   | { type: 'CLEAR_CACHE' };
 
 type Response =
-  | { ok: true; data: Contributions }
+  | { ok: true; data: Contributions }   // until the privacy-modes phase: Contributions | { viewerLogin } for other profiles
   | { ok: false; error: ErrorCode; resetAt?: string }; // resetAt: ISO, only with RATE_LIMITED
 
 type ErrorCode = 'NO_TOKEN' | 'UNAUTHORIZED' | 'RATE_LIMITED' | 'NOT_FOUND' | 'NETWORK' | 'UNKNOWN';
@@ -370,7 +375,7 @@ interface Contributions {
 2. **Prompt (content script).** Mount the prompt with `createShadowRootUi` (`cssInjectionMode: 'ui'`) next to the graph. On accept, send `{ type: 'GET_CONTRIBUTIONS', login }`. If "always show" is saved in settings, skip the prompt. Show a loading state.
 3. **Privacy check (service worker).** Read the token from settings; if missing, respond `NO_TOKEN`. Query the viewer and the profile user (see queries below). Resolve the `PrivacyMode` and the matching `PrivacyPolicy`.
 4. **Fetch (service worker + cache + API).** Check the cache. List repos for the mode:
-   - `owner`: `viewer.repositories(affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER])`
+   - `owner`: `viewer.repositories(affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], isFork: false, orderBy: { field: PUSHED_AT, direction: DESC })`, stopping at the first repo pushed before the grid start. `ownerAffiliations` defaults to `[OWNER, COLLABORATOR]`, which would leave out organization-owned repos.
    - others: `user.repositories(privacy: PUBLIC)` plus `repositoriesContributedTo`, plus private ones only if mode is `publicPlusCounts` and the token can see them
 
    Skip forks. For each repo, fetch every branch's history filtered by author, once with `author: { id }` and once with `author: { emails }` for the user's extra emails (owner mode only, since emails come from settings). Then fetch merged-PR commits to recover squash-merged work, keeping only commits authored by this user.
@@ -398,9 +403,8 @@ query ViewerAndUser($login: String!) {
 Branches and history for one repo (step 4):
 
 ```graphql
-query BranchCommits($owner: String!, $name: String!, $author: CommitAuthor!, $since: GitTimestamp, $refCursor: String) {
+query BranchCommits($owner: String!, $name: String!, $author: CommitAuthor!, $since: GitTimestamp!, $refCursor: String) {
   repository(owner: $owner, name: $name) {
-    isPrivate
     refs(refPrefix: "refs/heads/", first: 50, after: $refCursor) {
       pageInfo { hasNextPage endCursor }
       nodes {

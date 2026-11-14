@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createGitHubClient } from '../../../../src/services/github/client';
-import { VIEWER_QUERY } from '../../../../src/services/github/queries';
+import type { RepoRef } from '../../../../src/core/types';
+import { createGitHubClient, createRateBudget } from '../../../../src/services/github/client';
+import { BRANCH_COMMITS, BRANCH_HISTORY, OWNER_REPOS, VIEWER_QUERY } from '../../../../src/services/github/queries';
 
 const TOKEN = 'test-token';
 const NOW = Date.parse('2026-11-13T00:00:00.000Z');
@@ -172,5 +173,489 @@ describe('GitHubClient.getViewer', () => {
       const { client } = clientReturning(response);
       await expect(client.getViewer(TOKEN)).resolves.toEqual({ ok: false, error: 'UNKNOWN' });
     }
+  });
+});
+
+// Paging, rate budget, and skipped repositories (owner-graph P02).
+const SINCE = '2023-01-08T00:00:00-05:00';
+const AUTHOR = { id: 'U_viewer' };
+const REPO: RepoRef = { owner: 'acme', name: 'widgets', isPrivate: true, isFork: false };
+const PLENTY = { remaining: 4000, resetAt: '2024-01-11T13:00:00Z' };
+const LOW = { remaining: 199, resetAt: '2024-01-11T13:00:00Z' };
+
+interface Call {
+  query: string;
+  variables: Record<string, unknown>;
+}
+
+/** A fake fetch that answers each request with the next scripted body and records what was sent. */
+function scripted(bodies: (unknown | Response)[]) {
+  const calls: Call[] = [];
+  const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+    calls.push(JSON.parse(init.body as string) as Call);
+    const next = bodies.shift();
+    if (next === undefined) {
+      throw new Error('unexpected extra request');
+    }
+    return next instanceof Response
+      ? next
+      : new Response(JSON.stringify(next), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  });
+  return { calls, client: createGitHubClient({ fetch }) };
+}
+
+function repoNode(name: string, pushedAt: string | null, extra: Record<string, unknown> = {}) {
+  return { name, owner: { login: 'acme' }, isPrivate: false, isFork: false, pushedAt, ...extra };
+}
+
+function reposPage(nodes: unknown[], next: string | null, rateLimit = PLENTY) {
+  return {
+    data: {
+      viewer: { repositories: { pageInfo: { hasNextPage: next !== null, endCursor: next }, nodes } },
+      rateLimit,
+    },
+  };
+}
+
+function historyNode(oid: string) {
+  return { oid, authoredDate: '2024-01-10T15:00:00Z', messageHeadline: `commit ${oid}` };
+}
+
+function history(oids: string[], next: string | null) {
+  return { pageInfo: { hasNextPage: next !== null, endCursor: next }, nodes: oids.map(historyNode) };
+}
+
+function refsPage(branches: { name: string; oids: string[]; next?: string }[], nextRefs: string | null, rateLimit = PLENTY) {
+  return {
+    data: {
+      repository: {
+        refs: {
+          pageInfo: { hasNextPage: nextRefs !== null, endCursor: nextRefs },
+          nodes: branches.map((b) => ({ name: b.name, target: { history: history(b.oids, b.next ?? null) } })),
+        },
+      },
+      rateLimit,
+    },
+  };
+}
+
+function historyPage(oids: string[], next: string | null, rateLimit = PLENTY) {
+  return { data: { repository: { ref: { target: { history: history(oids, next) } } }, rateLimit } };
+}
+
+describe('GitHubClient.listOwnerRepos', () => {
+  it('requests the viewer repositories newest-pushed first, forks excluded, with all three affiliations', async () => {
+    const { calls, client } = scripted([reposPage([repoNode('a', '2024-01-10T00:00:00Z')], null)]);
+    await client.listOwnerRepos(TOKEN, SINCE, createRateBudget());
+    expect(calls[0]?.query).toBe(OWNER_REPOS);
+    expect(OWNER_REPOS).toContain('orderBy: { field: PUSHED_AT, direction: DESC }');
+    expect(OWNER_REPOS).toContain('isFork: false');
+    expect(OWNER_REPOS).toContain('affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]');
+    expect(OWNER_REPOS).toContain('rateLimit { remaining resetAt }');
+  });
+
+  it('follows pageInfo to a second page with the end cursor', async () => {
+    const { calls, client } = scripted([
+      reposPage([repoNode('a', '2024-01-10T00:00:00Z')], 'c1'),
+      reposPage([repoNode('b', '2024-01-09T00:00:00Z')], null),
+    ]);
+    const result = await client.listOwnerRepos(TOKEN, SINCE, createRateBudget());
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        items: [
+          { owner: 'acme', name: 'a', isPrivate: false, isFork: false },
+          { owner: 'acme', name: 'b', isPrivate: false, isFork: false },
+        ],
+        truncated: false,
+      },
+    });
+    expect(calls.map((c) => c.variables.cursor)).toEqual([null, 'c1']);
+  });
+
+  it('stops paging at the first repository pushed before since', async () => {
+    const { calls, client } = scripted([
+      reposPage([repoNode('fresh', '2023-06-01T00:00:00Z'), repoNode('stale', '2023-01-08T04:59:59Z'), repoNode('after', '2024-01-01T00:00:00Z')], 'c1'),
+    ]);
+    const result = await client.listOwnerRepos(TOKEN, SINCE, createRateBudget());
+    expect(result.ok && result.data.items.map((r) => r.name)).toEqual(['fresh']);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('keeps a repository pushed exactly at since', async () => {
+    const { client } = scripted([reposPage([repoNode('edge', '2023-01-08T05:00:00Z')], null)]);
+    const result = await client.listOwnerRepos(TOKEN, SINCE, createRateBudget());
+    expect(result.ok && result.data.items.map((r) => r.name)).toEqual(['edge']);
+  });
+
+  it('skips a repository that was never pushed without stopping', async () => {
+    const { client } = scripted([reposPage([repoNode('empty', null), repoNode('kept', '2024-01-01T00:00:00Z')], null)]);
+    const result = await client.listOwnerRepos(TOKEN, SINCE, createRateBudget());
+    expect(result.ok && result.data.items.map((r) => r.name)).toEqual(['kept']);
+  });
+
+  it('returns the other repositories when a page has data plus a FORBIDDEN error', async () => {
+    const page = reposPage([null, repoNode('kept', '2024-01-01T00:00:00Z')], null);
+    const { client } = scripted([
+      { ...page, errors: [{ type: 'FORBIDDEN', path: ['viewer', 'repositories', 'nodes', 0] }] },
+    ]);
+    const result = await client.listOwnerRepos(TOKEN, SINCE, createRateBudget());
+    expect(result).toEqual({
+      ok: true,
+      data: { items: [{ owner: 'acme', name: 'kept', isPrivate: false, isFork: false }], truncated: false },
+    });
+  });
+
+  it('records the rate limit and stops before the next page when it falls below 200', async () => {
+    const budget = createRateBudget();
+    const { calls, client } = scripted([reposPage([repoNode('a', '2024-01-10T00:00:00Z')], 'c1', LOW)]);
+    const result = await client.listOwnerRepos(TOKEN, SINCE, budget);
+    expect(result).toEqual({
+      ok: true,
+      data: { items: [{ owner: 'acme', name: 'a', isPrivate: false, isFork: false }], truncated: true },
+    });
+    expect(calls).toHaveLength(1);
+    expect(budget.exhausted()).toBe(true);
+    expect(budget.resetAt()).toBe(LOW.resetAt);
+  });
+
+  it('returns a failure from any page as the failure', async () => {
+    const { client } = scripted([new Response('{}', { status: 500 })]);
+    await expect(client.listOwnerRepos(TOKEN, SINCE, createRateBudget())).resolves.toEqual({
+      ok: false,
+      error: 'NETWORK',
+    });
+  });
+});
+
+describe('GitHubClient.getBranchCommits', () => {
+  it('sends the repository, author id, and since as variables', async () => {
+    const { calls, client } = scripted([refsPage([{ name: 'main', oids: ['a1'] }], null)]);
+    await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget());
+    expect(calls[0]).toEqual({
+      query: BRANCH_COMMITS,
+      variables: { owner: 'acme', name: 'widgets', author: AUTHOR, since: SINCE, refCursor: null },
+    });
+  });
+
+  it('maps commits with the given repository and branch', async () => {
+    const { client } = scripted([refsPage([{ name: 'main', oids: ['a1'] }], null)]);
+    const result = await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget());
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        items: [{ sha: 'a1', authoredDate: '2024-01-10T15:00:00Z', messageHeadline: 'commit a1', repo: REPO, branch: 'main', source: 'branch' }],
+        truncated: false,
+      },
+    });
+  });
+
+  it('requests a second refs page and a second history page, and keeps the later SHAs', async () => {
+    const { calls, client } = scripted([
+      refsPage([{ name: 'feature/x', oids: ['a1'], next: 'h1' }], 'r1'),
+      historyPage(['a2'], null),
+      refsPage([{ name: 'main', oids: ['b1'] }], null),
+    ]);
+    const result = await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget());
+    expect(result.ok && result.data.items.map((c) => [c.sha, c.branch])).toEqual([
+      ['a1', 'feature/x'],
+      ['a2', 'feature/x'],
+      ['b1', 'main'],
+    ]);
+    expect(calls.map((c) => c.query)).toEqual([BRANCH_COMMITS, BRANCH_HISTORY, BRANCH_COMMITS]);
+    expect(calls[2]?.variables.refCursor).toBe('r1');
+  });
+
+  it('continues history with the same author id and since, and the branch as a variable', async () => {
+    const { calls, client } = scripted([
+      refsPage([{ name: 'feature/"quoted"', oids: ['a1'], next: 'h1' }], null),
+      historyPage(['a2'], 'h2'),
+      historyPage(['a3'], null),
+    ]);
+    await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget());
+    expect(calls[1]?.variables).toEqual({
+      owner: 'acme',
+      name: 'widgets',
+      author: AUTHOR,
+      since: SINCE,
+      qualifiedName: 'refs/heads/feature/"quoted"',
+      cursor: 'h1',
+    });
+    expect(calls[2]?.variables.cursor).toBe('h2');
+    for (const call of calls) {
+      expect(call.query).not.toContain('quoted');
+    }
+  });
+
+  it('returns no commits and no failure for a null repository', async () => {
+    const { client } = scripted([{ data: { repository: null, rateLimit: PLENTY } }]);
+    await expect(client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget())).resolves.toEqual({
+      ok: true,
+      data: { items: [], truncated: false },
+    });
+  });
+
+  it('skips a repository named in a FORBIDDEN or NOT_FOUND error, even if some data came back', async () => {
+    for (const type of ['FORBIDDEN', 'NOT_FOUND']) {
+      const page = refsPage([{ name: 'main', oids: ['a1'] }], null);
+      const { client } = scripted([{ ...page, errors: [{ type, path: ['repository'] }] }]);
+      await expect(client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget())).resolves.toEqual({
+        ok: true,
+        data: { items: [], truncated: false },
+      });
+    }
+  });
+
+  it('stops before a history follow-up when the budget falls below 200, keeping what it has', async () => {
+    const budget = createRateBudget();
+    const { calls, client } = scripted([refsPage([{ name: 'main', oids: ['a1'], next: 'h1' }], 'r1', LOW)]);
+    const result = await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, budget);
+    expect(result.ok && result.data).toEqual({ items: [expect.objectContaining({ sha: 'a1' })], truncated: true });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('stops before the next refs page when the budget falls below 200', async () => {
+    const { calls, client } = scripted([refsPage([{ name: 'main', oids: ['a1'] }], 'r1', LOW)]);
+    const result = await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget());
+    expect(result.ok && result.data.truncated).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('returns a first-page failure as the failure', async () => {
+    const { client } = scripted([new Response('{}', { status: 403, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1704978000' } })]);
+    await expect(client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget())).resolves.toEqual({
+      ok: false,
+      error: 'RATE_LIMITED',
+      resetAt: new Date(1_704_978_000 * 1000).toISOString(),
+    });
+  });
+
+  it('keeps the commits already gathered when a later page fails, and reports the failure', async () => {
+    const { client } = scripted([
+      refsPage([{ name: 'main', oids: ['a1'], next: 'h1' }], null),
+      new Response('{}', { status: 502 }),
+    ]);
+    const result = await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget());
+    expect(result).toEqual({
+      ok: true,
+      data: { items: [expect.objectContaining({ sha: 'a1' })], truncated: true, failure: { ok: false, error: 'NETWORK' } },
+    });
+  });
+
+  it('moves on when a branch disappears between pages', async () => {
+    const { client } = scripted([
+      refsPage([{ name: 'gone', oids: ['a1'], next: 'h1' }, { name: 'main', oids: ['b1'] }], null),
+      { data: { repository: { ref: null }, rateLimit: PLENTY } },
+    ]);
+    const result = await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget());
+    expect(result.ok && result.data).toEqual({
+      items: [expect.objectContaining({ sha: 'a1' }), expect.objectContaining({ sha: 'b1' })],
+      truncated: false,
+    });
+  });
+});
+
+describe('createRateBudget', () => {
+  it('is not exhausted before any response and ignores a missing rate limit', () => {
+    const budget = createRateBudget();
+    budget.record(undefined);
+    expect(budget.exhausted()).toBe(false);
+    expect(budget.resetAt()).toBeUndefined();
+  });
+
+  it('keeps the lowest count in a window, so an older reply arriving late cannot refill it', () => {
+    const budget = createRateBudget();
+    budget.record({ remaining: 199, resetAt: '2024-01-11T13:00:00Z' });
+    budget.record({ remaining: 4000, resetAt: '2024-01-11T13:00:00Z' });
+    expect(budget.exhausted()).toBe(true);
+  });
+
+  it('starts over when a later window begins', () => {
+    const budget = createRateBudget();
+    budget.record({ remaining: 150, resetAt: '2024-01-11T13:00:00Z' });
+    budget.record({ remaining: 5000, resetAt: '2024-01-11T14:00:00Z' });
+    expect(budget.exhausted()).toBe(false);
+    expect(budget.resetAt()).toBe('2024-01-11T14:00:00Z');
+    budget.record({ remaining: 100, resetAt: '2024-01-11T13:00:00Z' }); // a late reply from the old window
+    expect(budget.exhausted()).toBe(false);
+    expect(budget.resetAt()).toBe('2024-01-11T14:00:00Z');
+  });
+
+  it('is exhausted below 200 and not at 200', () => {
+    const budget = createRateBudget();
+    budget.record({ remaining: 200, resetAt: 'r' });
+    expect(budget.exhausted()).toBe(false);
+    budget.record({ remaining: 199, resetAt: 'r' });
+    expect(budget.exhausted()).toBe(true);
+  });
+});
+
+// Loop exits the first paging tests did not pin (test-coverage-audit, owner-graph P02).
+describe('GitHubClient.getBranchCommits: every loop exit', () => {
+  it('keeps page-1 commits when refs page 2 fails, and reports the failure', async () => {
+    for (const failing of [
+      new Response('{}', { status: 502 }),
+      new Response('{}', { status: 429, headers: { 'retry-after': '60' } }),
+    ]) {
+      const { calls, client } = scripted([refsPage([{ name: 'main', oids: ['a1'] }], 'r1'), failing]);
+      const result = await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget());
+      expect(result.ok).toBe(true);
+      expect(result.ok && result.data.items.map((c) => c.sha)).toEqual(['a1']);
+      expect(result.ok && result.data.truncated).toBe(true);
+      expect(result.ok && result.data.failure?.ok).toBe(false);
+      expect(calls).toHaveLength(2);
+    }
+  });
+
+  it('records the rate limit from a history page and stops before the next one', async () => {
+    const { calls, client } = scripted([
+      refsPage([{ name: 'main', oids: ['a1'], next: 'h1' }], null),
+      historyPage(['a2'], 'h2', LOW),
+    ]);
+    const result = await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget());
+    expect(result.ok && result.data).toEqual({
+      items: [expect.objectContaining({ sha: 'a1' }), expect.objectContaining({ sha: 'a2' })],
+      truncated: true,
+    });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('stops before any follow-up when another repository has already exhausted the shared budget', async () => {
+    const budget = createRateBudget();
+    budget.record(LOW);
+    const { calls, client } = scripted([refsPage([{ name: 'main', oids: ['a1'], next: 'h1' }], 'r1', LOW)]);
+    const result = await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, budget);
+    expect(result.ok && result.data.truncated).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('follows up every branch with more history, not only the first', async () => {
+    const { calls, client } = scripted([
+      refsPage([
+        { name: 'one', oids: ['a1'], next: 'h1' },
+        { name: 'two', oids: ['b1'], next: 'h2' },
+      ], null),
+      historyPage(['a2'], null),
+      historyPage(['b2'], null),
+    ]);
+    const result = await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget());
+    expect(result.ok && result.data.items.map((c) => c.sha)).toEqual(['a1', 'b1', 'a2', 'b2']);
+    expect(calls.slice(1).map((c) => c.variables.qualifiedName)).toEqual(['refs/heads/one', 'refs/heads/two']);
+  });
+
+  it('after a deleted branch, still follows up the next branch and the next refs page', async () => {
+    const { calls, client } = scripted([
+      refsPage([
+        { name: 'gone', oids: ['a1'], next: 'h1' },
+        { name: 'kept', oids: ['b1'], next: 'h2' },
+      ], 'r1'),
+      { data: { repository: { ref: null }, rateLimit: PLENTY } },
+      historyPage(['b2'], null),
+      refsPage([{ name: 'main', oids: ['c1'] }], null),
+    ]);
+    const result = await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget());
+    expect(result.ok && result.data).toEqual({
+      items: ['a1', 'b1', 'b2', 'c1'].map((sha) => expect.objectContaining({ sha })),
+      truncated: false,
+    });
+    expect(calls).toHaveLength(4);
+  });
+
+  it('keeps the page when a FORBIDDEN error points inside the repository, not at it', async () => {
+    const page = refsPage([{ name: 'main', oids: ['a1'] }], null);
+    const { client } = scripted([
+      { ...page, errors: [{ type: 'FORBIDDEN', path: ['repository', 'refs', 'nodes', 3, 'target'] }] },
+    ]);
+    const result = await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget());
+    expect(result.ok && result.data).toEqual({ items: [expect.objectContaining({ sha: 'a1' })], truncated: false });
+  });
+
+  it('marks the result truncated when the repository becomes hidden on a later refs page', async () => {
+    const page2 = refsPage([{ name: 'other', oids: ['b1'] }], null);
+    for (const second of [
+      { ...page2, errors: [{ type: 'FORBIDDEN', path: ['repository'] }] },
+      { data: { repository: null, rateLimit: PLENTY } },
+    ]) {
+      const { client } = scripted([refsPage([{ name: 'main', oids: ['a1'] }], 'r1'), second]);
+      const result = await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget());
+      expect(result.ok && result.data).toEqual({ items: [expect.objectContaining({ sha: 'a1' })], truncated: true });
+    }
+  });
+});
+
+describe('GitHubClient.listOwnerRepos: every loop exit', () => {
+  it('returns a failure on page 2 as the failure', async () => {
+    const { client } = scripted([
+      reposPage([repoNode('a', '2024-01-10T00:00:00Z')], 'c1'),
+      new Response('{}', { status: 502 }),
+    ]);
+    await expect(client.listOwnerRepos(TOKEN, SINCE, createRateBudget())).resolves.toEqual({
+      ok: false,
+      error: 'NETWORK',
+    });
+  });
+
+  it('is not truncated when the low-budget page was the last page', async () => {
+    const { client } = scripted([reposPage([repoNode('a', '2024-01-10T00:00:00Z')], null, LOW)]);
+    const result = await client.listOwnerRepos(TOKEN, SINCE, createRateBudget());
+    expect(result.ok && result.data.truncated).toBe(false);
+  });
+
+  it('keeps a repository whose pushedAt cannot be parsed, rather than stopping on it', async () => {
+    const { client } = scripted([
+      reposPage([repoNode('odd', 'not-a-date'), repoNode('kept', '2024-01-01T00:00:00Z')], null),
+    ]);
+    const result = await client.listOwnerRepos(TOKEN, SINCE, createRateBudget());
+    expect(result.ok && result.data.items.map((r) => r.name)).toEqual(['odd', 'kept']);
+  });
+});
+
+describe('createRateBudget: windows and unparseable times', () => {
+  it('lowers the count within the same window', () => {
+    const budget = createRateBudget();
+    budget.record({ remaining: 4000, resetAt: '2024-01-11T13:00:00Z' });
+    budget.record({ remaining: 199, resetAt: '2024-01-11T13:00:00Z' });
+    expect(budget.exhausted()).toBe(true);
+  });
+
+  it('never lets a reply with an unparseable reset time refill the count', () => {
+    const budget = createRateBudget();
+    budget.record({ remaining: 150, resetAt: '2024-01-11T13:00:00Z' });
+    budget.record({ remaining: 5000, resetAt: 'not-a-date' });
+    expect(budget.exhausted()).toBe(true);
+    expect(budget.resetAt()).toBe('2024-01-11T13:00:00Z');
+  });
+
+  it('takes a parseable reset time after an unparseable one, and still only lowers the count', () => {
+    const budget = createRateBudget();
+    budget.record({ remaining: 300, resetAt: 'not-a-date' });
+    budget.record({ remaining: 4000, resetAt: '2024-01-11T13:00:00Z' });
+    expect(budget.exhausted()).toBe(false);
+    expect(budget.resetAt()).toBe('2024-01-11T13:00:00Z');
+    budget.record({ remaining: 100, resetAt: 'also-bad' });
+    expect(budget.exhausted()).toBe(true);
+  });
+});
+
+describe('GitHubClient.getBranchCommits: repository hidden during a history follow-up', () => {
+  it('marks the result truncated when the history reply has no repository, or a FORBIDDEN error on it', async () => {
+    for (const reply of [
+      { data: { repository: null, rateLimit: PLENTY } },
+      { ...historyPage(['x9'], null), errors: [{ type: 'FORBIDDEN', path: ['repository'] }] },
+    ]) {
+      const { client } = scripted([refsPage([{ name: 'main', oids: ['a1'], next: 'h1' }], null), reply]);
+      const result = await client.getBranchCommits(TOKEN, REPO, AUTHOR, SINCE, createRateBudget());
+      expect(result.ok && result.data).toEqual({ items: [expect.objectContaining({ sha: 'a1' })], truncated: true });
+    }
+  });
+});
+
+describe('createRateBudget: first stored time unparseable', () => {
+  it('keeps the lower count when a parseable time follows an unparseable one', () => {
+    const budget = createRateBudget();
+    budget.record({ remaining: 150, resetAt: 'not-a-date' });
+    budget.record({ remaining: 4000, resetAt: '2024-01-11T13:00:00Z' });
+    expect(budget.exhausted()).toBe(true);
+    expect(budget.resetAt()).toBe('2024-01-11T13:00:00Z');
   });
 });
