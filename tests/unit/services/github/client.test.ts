@@ -830,6 +830,83 @@ describe('GitHubClient.getMergedPrCommits', () => {
     expect(followResult.ok && followResult.data.truncated).toBe(true);
   });
 
+  it('returns a first-page failure instead of an empty truncated page', async () => {
+    for (const [status, error] of [
+      [502, 'NETWORK'],
+      [401, 'UNAUTHORIZED'],
+    ] as const) {
+      const { client } = scripted([new Response('{}', { status })]);
+      await expect(client.getMergedPrCommits(TOKEN, PROFILE, MERGED_SINCE, [], createRateBudget())).resolves.toEqual({
+        ok: false,
+        error,
+      });
+    }
+  });
+
+  it('returns UNKNOWN when the first page has no search connection', async () => {
+    const { client } = scripted([{ data: { rateLimit: PLENTY } }]);
+    await expect(client.getMergedPrCommits(TOKEN, PROFILE, MERGED_SINCE, [], createRateBudget())).resolves.toEqual({
+      ok: false,
+      error: 'UNKNOWN',
+    });
+  });
+
+  it('requests another PR_COMMITS page when the follow-up still has a next cursor', async () => {
+    const { calls, client } = scripted([
+      searchPage([pullRequestNode(7, 'a1', 'p2')], null),
+      prCommitsPage([{ oid: 'a2' }], 'p3'),
+      prCommitsPage([{ oid: 'a3' }], null),
+    ]);
+    const result = await client.getMergedPrCommits(TOKEN, PROFILE, MERGED_SINCE, [], createRateBudget());
+    expect(calls.slice(1).map((call) => call.variables.cursor)).toEqual(['p2', 'p3']);
+    expect(result.ok && result.data.items.map((commit) => commit.sha)).toEqual(['a1', 'a2', 'a3']);
+  });
+
+  it('keeps the search-page commits when a follow-up page fails', async () => {
+    const { client } = scripted([
+      searchPage([pullRequestNode(7, 'a1', 'p2')], null),
+      new Response('{}', { status: 502 }),
+    ]);
+    await expect(client.getMergedPrCommits(TOKEN, PROFILE, MERGED_SINCE, [], createRateBudget())).resolves.toEqual({
+      ok: true,
+      data: {
+        items: [expect.objectContaining({ sha: 'a1' })],
+        truncated: true,
+        failure: { ok: false, error: 'NETWORK' },
+      },
+    });
+  });
+
+  it('skips a forbidden follow-up and still fetches the next pull request on the page', async () => {
+    for (const type of ['FORBIDDEN', 'NOT_FOUND']) {
+      const { calls, client } = scripted([
+        searchPage([pullRequestNode(7, 'a1', 'p2'), pullRequestNode(8, 'b1', 'q2')], null),
+        { ...prCommitsPage([{ oid: 'a2' }], null), errors: [{ type, path: ['repository', 'pullRequest'] }] },
+        prCommitsPage([{ oid: 'b2' }], null),
+      ]);
+      const result = await client.getMergedPrCommits(TOKEN, PROFILE, MERGED_SINCE, [], createRateBudget());
+      expect(calls.slice(1).map((call) => call.variables.number)).toEqual([7, 8]);
+      expect(result.ok && result.data.items.map((commit) => commit.sha)).toEqual(['a1', 'b1', 'b2']);
+      expect(result.ok && result.data.truncated).toBe(false);
+    }
+  });
+
+  it('records a follow-up rate limit and does not request the next commit page once it is under 200', async () => {
+    const budget = createRateBudget();
+    const { calls, client } = scripted([
+      searchPage([pullRequestNode(7, 'a1', 'p2')], null),
+      prCommitsPage([{ oid: 'a2' }], 'p3', LOW),
+    ]);
+    const result = await client.getMergedPrCommits(TOKEN, PROFILE, MERGED_SINCE, [], budget);
+    expect(calls).toHaveLength(2);
+    expect(budget.exhausted()).toBe(true);
+    expect(budget.resetAt()).toBe(LOW.resetAt);
+    expect(result.ok && result.data).toMatchObject({
+      truncated: true,
+      items: [expect.objectContaining({ sha: 'a1' }), expect.objectContaining({ sha: 'a2' })],
+    });
+  });
+
   it('keeps commits already gathered when a later search page fails', async () => {
     const { client } = scripted([
       searchPage([pullRequestNode(1, 'a1', null)], 'c2'),

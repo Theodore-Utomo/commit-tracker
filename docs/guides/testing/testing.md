@@ -76,7 +76,7 @@ Options page (open it from `chrome://extensions` → Details → Extension optio
 2. Save with the input empty or only spaces. `Enter a token first.` appears, and extension storage has no `githubToken` key.
 3. Save a valid token. `Token saved.` and `A token is saved.` appear, and the input is empty.
 4. Close and reopen the page. `A token is saved.` shows, and the input is empty, `type="password"`, with no placeholder. Searching the Elements panel for the token finds nothing. The Always show checkbox round-trips: check it, reopen, and it stays checked; uncheck it, reopen, and it stays unchecked.
-5. Extra commit emails starts empty. Save ` dev@example.com `, a blank line, and `other@example.com`. The field shows those two addresses, and reopening the page shows the same two. No console line contains the addresses.
+5. Extra commit emails starts empty. Save ` dev@example.com `, a blank line, `a@example.com, b@example.com`, and `other@example.com`. The status says `Emails saved.` The field shows those four addresses, one per line, and reopening the page shows the same four. No console line contains an address.
 
 Content script and worker (DevTools on a github.com profile, content-script console context). Always show is off unless a step says otherwise. Nothing is fetched until Accept.
 

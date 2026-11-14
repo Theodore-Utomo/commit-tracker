@@ -543,6 +543,64 @@ describe('getContributions: merged pull requests and extra emails', () => {
     expect(client.getMergedPrCommits).not.toHaveBeenCalled();
   });
 
+  it('keeps the id-pass commit when the email pass fails, and does not search', async () => {
+    for (const error of ['RATE_LIMITED', 'NETWORK'] as const) {
+      const a = repo('a');
+      const failure =
+        error === 'RATE_LIMITED'
+          ? ({ ok: false, error, resetAt: LOW.resetAt } as const)
+          : ({ ok: false, error } as const);
+      const client = fakeClient({
+        repos: [a],
+        branches: { a: { result: page([commit('k1', a)]) } },
+        emailBranches: { a: { result: failure } },
+      });
+      const data = contributions(await getContributions('monalisa', deps(client, { emails: ['dev@example.com'] })));
+      expect(data.partial).toBe(true);
+      expect(data.days['2024-01-10']?.commits).toEqual([commit('k1', a)]);
+      expect(client.getBranchCommits).toHaveBeenCalledTimes(2);
+      expect(client.getMergedPrCommits).not.toHaveBeenCalled();
+    }
+  });
+
+  it('includes pull-request commits and marks partial when the search stops early', async () => {
+    const a = repo('a');
+    const pr = prOnly('pr1', a);
+    for (const prs of [
+      { ok: true as const, data: { items: [pr], truncated: true } },
+      {
+        ok: true as const,
+        data: { items: [pr], truncated: true, failure: { ok: false as const, error: 'NETWORK' as const } },
+      },
+    ]) {
+      const client = fakeClient({
+        repos: [a],
+        branches: { a: { result: page([commit('k1', a)]) } },
+        prs,
+      });
+      const data = contributions(await getContributions('monalisa', deps(client)));
+      expect(data.partial).toBe(true);
+      expect(data.days['2024-01-10']?.commits).toEqual([commit('k1', a), pr]);
+    }
+  });
+
+  it('does not fetch emails or search after a branch failure that already kept a commit', async () => {
+    const a = repo('a');
+    const b = repo('b');
+    const client = fakeClient({
+      repos: [a, b],
+      branches: {
+        a: { result: page([commit('k1', a)]) },
+        b: { result: { ok: false, error: 'RATE_LIMITED', resetAt: LOW.resetAt } },
+      },
+    });
+    const data = contributions(await getContributions('monalisa', deps(client, { emails: ['dev@example.com'] })));
+    expect(data.partial).toBe(true);
+    expect(data.totals.commits).toBe(1);
+    expect(client.getBranchCommits).toHaveBeenCalledTimes(2);
+    expect(client.getMergedPrCommits).not.toHaveBeenCalled();
+  });
+
   it('does not search merged pull requests when the branch phase already stopped', async () => {
     const a = repo('a');
     const client = fakeClient({
