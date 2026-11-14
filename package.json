@@ -10,7 +10,7 @@
     "zip": "wxt zip",
     "postinstall": "wxt prepare",
     "test": "vitest",
-    "test:e2e": "playwright test",
+    "test:e2e": "PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS=1 playwright test",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },

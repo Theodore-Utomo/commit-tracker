@@ -114,3 +114,15 @@ export function aggregateByDay(items: readonly (Commit | CountOnly)[], timeZone:
 
   return { days, totals: { commits: seen.size, repos: repos.size } };
 }
+
+/**
+ * Maps each count to a color level from 0 to 4. Zero stays 0. A positive count at
+ * index `i` among the `n` distinct positive counts, sorted ascending, has level
+ * `1 + floor(i * 4 / n)`, so equal counts share a level and one distinct count is 1.
+ */
+export function colorLevels(counts: readonly number[]): number[] {
+  const distinct = [...new Set(counts.filter((count) => count > 0))].sort((a, b) => a - b);
+  const n = distinct.length;
+  const level = new Map(distinct.map((count, index) => [count, 1 + Math.floor((index * 4) / n)]));
+  return counts.map((count) => level.get(count) ?? 0);
+}

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { aggregateByDay, inGridYear, isCountOnly, localDay, startOfLocalDayIso } from '../../../src/core/aggregate';
+import {
+  aggregateByDay,
+  colorLevels,
+  inGridYear,
+  isCountOnly,
+  localDay,
+  startOfLocalDayIso,
+} from '../../../src/core/aggregate';
 import { gridDays } from '../../../src/core/grid';
 import { commit, countOnly, privateRepo } from './fixtures';
 
@@ -133,6 +140,50 @@ describe('aggregateByDay', () => {
     const copy = structuredClone(items);
     aggregateByDay(items, 'UTC');
     expect(items).toEqual(copy);
+  });
+});
+
+describe('colorLevels', () => {
+  it('keeps every zero at level 0', () => {
+    expect(colorLevels([0, 0, 0])).toEqual([0, 0, 0]);
+  });
+
+  it('maps one distinct positive count to level 1', () => {
+    expect(colorLevels([0, 4, 4])).toEqual([0, 1, 1]);
+  });
+
+  it('maps two days with count 2 and one day with count 9 to levels 1 and 3', () => {
+    expect(colorLevels([2, 9, 2])).toEqual([1, 3, 1]);
+  });
+
+  it('maps distinct counts 1, 2, 3 to levels 1, 2, 3', () => {
+    expect(colorLevels([1, 2, 3])).toEqual([1, 2, 3]);
+  });
+
+  it('maps four increasing counts to levels 1, 2, 3, and 4', () => {
+    expect(colorLevels([1, 2, 3, 4])).toEqual([1, 2, 3, 4]);
+  });
+
+  it('maps eight distinct counts to 1, 1, 2, 2, 3, 3, 4, 4', () => {
+    expect(colorLevels([1, 2, 3, 4, 5, 6, 7, 8])).toEqual([1, 1, 2, 2, 3, 3, 4, 4]);
+  });
+
+  it('sorts counts numerically, so 2 ranks below 10', () => {
+    expect(colorLevels([10, 2])).toEqual([3, 1]);
+  });
+
+  it('gives days with the same count the same level', () => {
+    const counts = [5, 1, 5, 9, 1, 0, 9];
+    const levels = colorLevels(counts);
+    for (let i = 0; i < counts.length; i += 1) {
+      for (let j = i + 1; j < counts.length; j += 1) {
+        if (counts[i] === counts[j]) {
+          expect(levels[i]).toBe(levels[j]);
+        }
+      }
+    }
+    expect(levels[5]).toBe(0);
+    expect(new Set(levels.filter((level) => level > 0)).size).toBe(3);
   });
 });
 

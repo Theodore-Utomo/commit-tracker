@@ -193,6 +193,8 @@ src/
     privacy.ts               # Privacy policies (strategy pattern)
     aggregate.ts             # Group commits by local day, compute levels
     grid.ts                  # 53 × 7 grid layout math
+  storage/                   # Display preferences the page may read. No token.
+    preferences.ts           # alwaysShow. WXT storage and core/ only; never services/
   services/                  # Used by the service worker
     github/
       client.ts              # GitHubClient interface + fetch implementation
@@ -223,7 +225,9 @@ Import rules:
 
 - `core/` imports nothing outside `core/`.
 - `services/` may import `core/` and `messaging/protocol.ts`.
-- `ui/` and `dom/` may import `core/` (types, grid math) and `messaging/`, never `services/`.
+- `storage/` may import WXT `storage` and `core/` only. It never imports `services/`.
+- `ui/` and `dom/` may import `core/` (types, grid math), `messaging/`, and `storage/`. They never import `services/`.
+- The profile content script may import `storage/`. It never imports `services/`. ESLint `no-restricted-imports` enforces that for the content script, `ui/`, and `dom/`.
 - `entrypoints/` wire things together and contain as little logic as possible.
 
 ---
