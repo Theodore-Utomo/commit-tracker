@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { localDay } from '../../../src/core/aggregate';
+import { localDay, startOfLocalDayIso } from '../../../src/core/aggregate';
 import { gridDays } from '../../../src/core/grid';
 import type { Commit, Contributions, RepoRef } from '../../../src/core/types';
 import type { Response } from '../../../src/messaging/protocol';
@@ -710,6 +710,35 @@ describe('getContributions: cache', () => {
     const again = contributions(await getContributions('monalisa', dependencies));
     expect(again.totals.commits).toBe(2);
     expect(again.days['2024-01-05']?.commits).toEqual([late]);
+  });
+
+  it('on a hit, searches merged pull requests by the UTC day of the since timestamp', async () => {
+    const tokyo = 'Asia/Tokyo';
+    const gridStartDay = gridDays(localDay(NOW.toISOString(), tokyo))[0] as string;
+    const gridStartIso = startOfLocalDayIso(gridStartDay, tokyo);
+    const utcDay = new Date(gridStartIso).toISOString().slice(0, 10);
+    expect(utcDay < gridStartDay).toBe(true);
+
+    const cache = memoryCache();
+    await cache.put(
+      { viewerLogin: 'monalisa', profileLogin: 'monalisa', mode: 'owner' },
+      {
+        schemaVersion: 1,
+        lastSync: new Date(gridStartIso).toISOString(),
+        contributions: {
+          login: 'monalisa',
+          mode: 'owner',
+          days: {},
+          totals: { commits: 0, repos: 0 },
+          partial: false,
+          fetchedAt: NOW.toISOString(),
+        },
+      },
+    );
+    const client = fakeClient({ repos: [repo('a')] });
+    await getContributions('monalisa', { ...deps(client, { cache }), timeZone: tokyo });
+    expect(client.listOwnerRepos).toHaveBeenCalledWith('token', gridStartIso, expect.anything());
+    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', utcDay, [], expect.anything());
   });
 
   it('uses the grid start when lastSync minus 14 days is earlier than the grid', async () => {
