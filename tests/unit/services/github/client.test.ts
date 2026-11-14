@@ -843,6 +843,34 @@ describe('GitHubClient.getMergedPrCommits', () => {
     }
   });
 
+  it('keeps earlier commits when a later search page has no search connection', async () => {
+    const later = { remaining: 500, resetAt: '2024-01-11T14:00:00Z' };
+    const budget = createRateBudget();
+    const { client } = scripted([
+      searchPage([pullRequestNode(1, 'a1', null)], 'c2'),
+      { data: { rateLimit: later } },
+    ]);
+    const result = await client.getMergedPrCommits(TOKEN, PROFILE, MERGED_SINCE, [], budget);
+    expect(result).toEqual({
+      ok: true,
+      data: { items: [expect.objectContaining({ sha: 'a1' })], truncated: true },
+    });
+    expect(budget.resetAt()).toBe(later.resetAt);
+    expect(budget.exhausted()).toBe(false);
+  });
+
+  it('skips a follow-up whose pull request is gone and still fetches the next one', async () => {
+    const { calls, client } = scripted([
+      searchPage([pullRequestNode(7, 'a1', 'p2'), pullRequestNode(8, 'b1', 'q2')], null),
+      { data: { repository: { pullRequest: null }, rateLimit: PLENTY } },
+      prCommitsPage([{ oid: 'b2' }], null),
+    ]);
+    const result = await client.getMergedPrCommits(TOKEN, PROFILE, MERGED_SINCE, [], createRateBudget());
+    expect(calls.slice(1).map((call) => call.variables.number)).toEqual([7, 8]);
+    expect(result.ok && result.data).toMatchObject({ truncated: false });
+    expect(result.ok && result.data.items.map((commit) => commit.sha)).toEqual(['a1', 'b1', 'b2']);
+  });
+
   it('returns UNKNOWN when the first page has no search connection', async () => {
     const { client } = scripted([{ data: { rateLimit: PLENTY } }]);
     await expect(client.getMergedPrCommits(TOKEN, PROFILE, MERGED_SINCE, [], createRateBudget())).resolves.toEqual({
