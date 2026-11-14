@@ -21,3 +21,33 @@ export async function setToken(token: string): Promise<void> {
 export async function hasToken(): Promise<boolean> {
   return (await getToken()) !== undefined;
 }
+
+/** Extra commit emails. Used only as a GraphQL author filter, and only in owner mode. */
+const emailsItem = storage.defineItem<string[]>('local:commitEmails', { fallback: [] });
+
+function cleanEmails(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const cleaned: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string') {
+      continue;
+    }
+    const trimmed = entry.trim();
+    if (trimmed) {
+      cleaned.push(trimmed);
+    }
+  }
+  return cleaned;
+}
+
+/** The saved emails, trimmed, with blanks removed. Missing storage reads as an empty list. */
+export async function getCommitEmails(): Promise<string[]> {
+  return cleanEmails(await emailsItem.getValue());
+}
+
+/** Saves a trimmed email list. Blank entries are dropped. */
+export async function setCommitEmails(emails: readonly string[]): Promise<void> {
+  await emailsItem.setValue(cleanEmails(emails));
+}

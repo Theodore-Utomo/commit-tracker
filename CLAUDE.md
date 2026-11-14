@@ -266,9 +266,9 @@ The page (GitHub's DOM) is untrusted territory: other extensions and page script
 interface GitHubClient {
   getViewer(token: string): Promise<GitHubResult<Viewer>>;
   listOwnerRepos(token: string, since: string, budget: RateBudget): Promise<GitHubResult<Page<RepoRef>>>;
-  getBranchCommits(token: string, repo: RepoRef, author: { id: string }, since: string, budget: RateBudget): Promise<GitHubResult<Page<Commit>>>;
-  // Later phases: getMergedPrCommits (merged PRs), getViewerAndUser replacing getViewer and
-  // listPublicRepos (privacy modes).
+  getBranchCommits(token: string, repo: RepoRef, author: { id: string } | { emails: readonly string[] }, since: string, budget: RateBudget): Promise<GitHubResult<Page<Commit>>>;
+  getMergedPrCommits(token: string, login: string, mergedSince: string, savedEmails: readonly string[], budget: RateBudget): Promise<GitHubResult<Page<Commit>>>;
+  // Later phases: getViewerAndUser replacing getViewer, and listPublicRepos (privacy modes).
 }
 
 interface CacheStore {
@@ -433,12 +433,15 @@ Merged PR commits (step 4):
 ```graphql
 query MergedPrCommits($q: String!, $cursor: String) {
   search(query: $q, type: ISSUE, first: 25, after: $cursor) {
+    issueCount
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
+        number
         repository { owner { login } name isPrivate isFork }
         commits(first: 100) {
-          nodes { commit { oid authoredDate messageHeadline author { user { login } } } }
+          pageInfo { hasNextPage endCursor }
+          nodes { commit { oid authoredDate messageHeadline author { email user { login } } } }
         }
       }
     }
@@ -447,7 +450,7 @@ query MergedPrCommits($q: String!, $cursor: String) {
 }
 ```
 
-With `q = "author:<login> is:pr is:merged"`, plus `merged:>=<date>` for incremental syncs.
+When `commits.pageInfo.hasNextPage` is true, `PR_COMMITS` continues that pull request (`pullRequest(number:) { commits(first: 100, after: $cursor) }`). `q` is `author:<login> is:pr is:merged merged:>=<grid start>`, built from the login GitHub returned. A search `issueCount` above 1,000 sets the result partial, because GitHub search returns at most 1,000 hits. Incremental syncs narrow the same `merged:>=` date.
 
 Paginate any connection whose `pageInfo.hasNextPage` is true. The same commit appears on many branches, so expect heavy duplication before dedupe.
 
@@ -468,7 +471,7 @@ Paginate any connection whose `pageInfo.hasNextPage` is true. The same commit ap
 - TypeScript strict mode; no `any`. Prefer `type` unions over enums.
 - Pure functions in `core/`; side effects only in `services/` and entrypoints.
 - One GitHub selector module (`dom/github-page.ts`); no selectors anywhere else.
-- Never log the token or full API responses. Send the token only to `api.github.com`.
+- Never log the token, commit emails, or full API responses. Send the token only to `api.github.com`. Emails are sent only as GraphQL author filters, in owner mode, and are never copied onto a `Commit`.
 - Render user-provided text (commit messages, repo names) as text, never as HTML.
 - Small commits with conventional messages: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`.
 - When a design decision changes, update this file in the same commit.

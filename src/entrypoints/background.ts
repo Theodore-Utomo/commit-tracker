@@ -2,12 +2,13 @@ import { isRequest, KEEPALIVE_PORT } from '../messaging/protocol';
 import type { ContributionsDeps } from '../services/contributions';
 import { createGitHubClient } from '../services/github/client';
 import { handleGetContributions } from '../services/handle-message';
-import { getToken } from '../services/settings';
+import { getCommitEmails, getToken } from '../services/settings';
 
 export default defineBackground(() => {
   const deps: ContributionsDeps = {
     client: createGitHubClient(),
     getToken,
+    getCommitEmails,
     now: () => new Date(),
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   };

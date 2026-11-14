@@ -11,6 +11,10 @@ function fakeClient(getViewer: GitHubClient['getViewer']) {
     getViewer: vi.fn(getViewer),
     listOwnerRepos: vi.fn<GitHubClient['listOwnerRepos']>(async () => ({ ok: true, data: { items: [], truncated: false } })),
     getBranchCommits: vi.fn<GitHubClient['getBranchCommits']>(async () => ({ ok: true, data: { items: [], truncated: false } })),
+    getMergedPrCommits: vi.fn<GitHubClient['getMergedPrCommits']>(async () => ({
+      ok: true,
+      data: { items: [], truncated: false },
+    })),
   };
 }
 
@@ -18,7 +22,7 @@ const NOW = new Date('2024-01-11T17:00:00Z');
 
 /** Fills in the clock and time zone, which these tests do not exercise. */
 function withDeps(partial: Pick<ContributionsDeps, 'getToken' | 'client'>): ContributionsDeps {
-  return { ...partial, now: () => NOW, timeZone: 'America/New_York' };
+  return { ...partial, getCommitEmails: async () => [], now: () => NOW, timeZone: 'America/New_York' };
 }
 
 const viewerClient = () => fakeClient(async () => ({ ok: true, data: { login: 'monalisa', id: 'U_1' } }));
