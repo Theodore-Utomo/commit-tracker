@@ -11,7 +11,7 @@ Ship top to bottom. A sequence starts only after every sequence it depends on is
 | Sequence | Status | Index | Depends on | Purpose |
 | --- | --- | --- | --- | --- |
 | Detect and auth | In Progress | `detect-and-auth/index.md` | — | Notice a profile graph, save a token, and prove the content script can ask the worker a question. |
-| Owner graph | Pending | `owner-graph/index.md` | Detect and auth | Count the viewer's own branch commits, draw the heatmap, recover squash merges, and cache the result. |
+| Owner graph | In Progress | `owner-graph/index.md` | Detect and auth | Count the viewer's own branch commits, draw the heatmap, recover squash merges, and cache the result. |
 | Other viewers | Pending | `other-viewers/index.md` | Owner graph | Show other people's public commits safely, then add the toggle, day detail, and error states. |
 | Device login | — | _(not written)_ | Other viewers | Replace the pasted token with GitHub's device login. CLAUDE.md lists this as later, and the flow is not specified yet. |
 
