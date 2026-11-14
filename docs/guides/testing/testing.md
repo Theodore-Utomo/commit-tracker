@@ -110,4 +110,13 @@ DevTools open on your own profile (content-script console context), and the serv
 In a scratch build only (never commit it), raise `RATE_LIMIT_FLOOR` in `src/services/github/client.ts`:
 
 1. Above your remaining points: the shadow tree shows `RATE_LIMITED` and the reset time, and Accept is enabled again.
-2. A little below your remaining points, so the cutoff lands mid-fetch: the heatmap still appears, with no error code. The page does not say whether the count is partial. If the cutoff lands before any commit is kept, the shadow tree shows `RATE_LIMITED` instead.
+2. A little below your remaining points, so the cutoff lands mid-fetch: the heatmap still appears, with no error code. The page does not say whether the count is partial. If the cutoff lands before any commit is kept, the shadow tree shows `RATE_LIMITED` instead. Reload and accept again. `since` is the grid start, or 14 days before the last complete fetch. It is not the start time of the partial run.
+
+### Cache
+
+1. On your own profile, accept the prompt. The heading `All commits across branches` appears. In the service worker, `BranchCommits` `since` is the grid's first Sunday at local midnight, and `MergedPrCommits` uses that same local day.
+2. Reload the profile and accept again. Older days are still on the heatmap. The worker sends `OwnerRepos`, `BranchCommits`, and `MergedPrCommits` again, and `since` is about 14 days before the previous fetch.
+3. On the options page, click **Clear cache**. The page says `Cache cleared.` IndexedDB `commit-tracker` / `entries` is empty. Accept again. `since` is the grid start from step 1.
+4. Leave the options page open, reload the extension, and click **Clear cache** on that page. The page says `Could not clear the cache.`
+5. Start a fetch and click **Clear cache** before it finishes. The page says `Cache cleared.` The next accept uses the grid start.
+6. Start a fetch, then save a different account's token before it finishes. Accept on that account's profile. The heatmap has none of the first account's repository names or commit messages.

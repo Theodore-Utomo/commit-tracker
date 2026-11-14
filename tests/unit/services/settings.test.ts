@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
-import { getCommitEmails, getToken, hasToken, setCommitEmails, setToken } from '../../../src/services/settings';
+import { getCommitEmails, getToken, hasToken, setCommitEmails, setToken, watchToken } from '../../../src/services/settings';
 
 describe('token settings', () => {
   beforeEach(() => {
@@ -26,6 +26,19 @@ describe('token settings', () => {
     await expect(getToken()).resolves.toBe('ghp_example');
     await expect(hasToken()).resolves.toBe(true);
     await expect(fakeBrowser.storage.local.get('githubToken')).resolves.toEqual({ githubToken: 'ghp_example' });
+  });
+
+  it('watchToken runs when the token is saved or removed, and not when emails change', async () => {
+    const seen: unknown[][] = [];
+    watchToken((...args) => {
+      seen.push(args);
+    });
+
+    await setToken('ghp_example');
+    await setToken('   ');
+    await setCommitEmails(['dev@example.com']);
+
+    expect(seen).toEqual([[], []]);
   });
 
   it('removes the saved token when given a blank value', async () => {

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GetContributionsRequest } from '../../../src/messaging/protocol';
-import type { CacheStore } from '../../../src/services/cache/store';
+import type { CacheEntry, CacheStore } from '../../../src/services/cache/store';
 import type { ContributionsDeps, getContributions } from '../../../src/services/contributions';
 import type { GitHubClient } from '../../../src/services/github/client';
 import { handleClearCache, handleGetContributions, onTokenChanged } from '../../../src/services/handle-message';
@@ -22,15 +22,10 @@ function fakeClient(getViewer: GitHubClient['getViewer']) {
 const NOW = new Date('2024-01-11T17:00:00Z');
 
 function memoryCache(): CacheStore {
-  const entries = new Map<string, unknown>();
   return {
     get: vi.fn(async () => undefined),
-    put: vi.fn(async (key, entry) => {
-      entries.set(`${key.viewerLogin}|${key.profileLogin}|${key.mode}`, entry);
-    }),
-    clear: vi.fn(async () => {
-      entries.clear();
-    }),
+    put: vi.fn(async () => undefined),
+    clear: vi.fn(async () => undefined),
   };
 }
 
@@ -327,6 +322,45 @@ describe('in-flight requests and clear cache', () => {
       },
     };
     await expect(handleClearCache(cache)).resolves.toEqual({ ok: false, error: 'UNKNOWN' });
+  });
+
+  it('does not keep a put that was in flight when the token changed', async () => {
+    const entries = new Map<string, CacheEntry>();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let gated = false;
+    const cache: CacheStore = {
+      get: async (key) => {
+        const entry = entries.get(`${key.viewerLogin}|${key.profileLogin}|${key.mode}`);
+        return entry?.schemaVersion === 1 ? entry : undefined;
+      },
+      put: async (key, entry) => {
+        if (!gated) {
+          gated = true;
+          markStarted();
+          await gate;
+        }
+        entries.set(`${key.viewerLogin}|${key.profileLogin}|${key.mode}`, entry);
+      },
+      clear: async () => {
+        entries.clear();
+      },
+    };
+    const client = ownClient();
+    const pending = handleGetContributions(request, withDeps({ getToken: async () => 'token', client, cache }));
+    await started;
+    onTokenChanged();
+    release();
+    await pending;
+    await expect(cache.get({ viewerLogin: 'octocat', profileLogin: 'octocat', mode: 'owner' })).resolves.toBeUndefined();
+    await handleGetContributions(request, withDeps({ getToken: async () => 'token', client, cache }));
+    expect(client.listOwnerRepos).toHaveBeenCalledTimes(2);
   });
 
   it('does not keep a put that started before clear', async () => {

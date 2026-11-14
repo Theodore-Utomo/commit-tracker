@@ -35,6 +35,8 @@ export interface ContributionsDeps {
   cache: CacheStore;
   /** Set when the handler already resolved the viewer, so this function does not fetch it again. */
   resolvedViewer?: GitHubResult<Viewer>;
+  /** The trimmed token `getViewer` already used. Later calls do not read storage again. */
+  resolvedToken?: string;
   /** Captured before the first GraphQL call. The grid and `lastSync` both use it. */
   startedAt?: Date;
   /** False after Clear cache or a token change: skip the write. */
@@ -51,7 +53,7 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
   const { client, timeZone } = deps;
   const startedAt = deps.startedAt ?? deps.now();
 
-  const token = (await deps.getToken())?.trim();
+  const token = (deps.resolvedToken ?? (await deps.getToken()))?.trim();
   if (!token) {
     return { ok: false, error: 'NO_TOKEN' };
   }

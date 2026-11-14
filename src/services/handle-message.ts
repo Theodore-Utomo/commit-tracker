@@ -1,6 +1,6 @@
 import { LOGIN_PATTERN } from '../core/login';
 import type { Failure, GetContributionsRequest, Response } from '../messaging/protocol';
-import type { CacheStore } from './cache/store';
+import type { CacheEntry, CacheStore } from './cache/store';
 import { getContributions, type ContributionsDeps } from './contributions';
 import type { GitHubFailure } from './github/client';
 
@@ -42,6 +42,22 @@ function failed(error: unknown): Response {
   return { ok: false, error: error instanceof TypeError ? 'NETWORK' : 'UNKNOWN' };
 }
 
+/** A miss that stores no commits, so a rolled-back write does not leave messages in IndexedDB. */
+function emptyTombstone(entry: CacheEntry): CacheEntry {
+  return {
+    schemaVersion: 0,
+    lastSync: entry.lastSync,
+    contributions: {
+      login: entry.contributions.login,
+      mode: entry.contributions.mode,
+      days: {},
+      totals: { commits: 0, repos: 0 },
+      partial: false,
+      fetchedAt: entry.lastSync,
+    },
+  };
+}
+
 function flightKey(viewerLogin: string, profileLogin: string): string {
   return `${viewerLogin}|${profileLogin}|owner`.toLowerCase();
 }
@@ -58,7 +74,18 @@ function guardedCache(cache: CacheStore, recorded: number): CacheStore {
         if (generation !== recorded) {
           return;
         }
+        // Keep the previous record so a token change during the write can undo it.
+        const previous = await cache.get(key);
         await cache.put(key, entry);
+        if (generation === recorded) {
+          return;
+        }
+        const current = await cache.get(key);
+        if (current?.lastSync !== entry.lastSync) {
+          return;
+        }
+        // schemaVersion 0 reads as a miss and keeps no commit bodies. Restoring `previous` keeps a completed year.
+        await cache.put(key, previous ?? emptyTombstone(entry));
       }),
     clear: () => enqueue(() => cache.clear()),
   };
@@ -101,6 +128,7 @@ export async function handleGetContributions(
       ...deps,
       startedAt,
       resolvedViewer: viewer,
+      resolvedToken: token,
       canWrite: () => generation === recorded,
       cache: guardedCache(deps.cache, recorded),
     };
