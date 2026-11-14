@@ -1,7 +1,19 @@
-import { mapViewer, type Viewer } from './mappers';
-import { VIEWER_QUERY } from './queries';
+import type { Commit, RepoRef } from '../../core/types';
+import {
+  mapBranchCommits,
+  mapBranchHistory,
+  mapRateLimit,
+  mapRepos,
+  mapViewer,
+  type RateLimit,
+  type Viewer,
+} from './mappers';
+import { BRANCH_COMMITS, BRANCH_HISTORY, OWNER_REPOS, VIEWER_QUERY } from './queries';
 
 const GRAPHQL_URL = 'https://api.github.com/graphql';
+
+/** Below this many rate-limit points, no further page is requested. */
+export const RATE_LIMIT_FLOOR = 200;
 
 export interface GraphQLError {
   type?: string;
@@ -19,8 +31,80 @@ export type GitHubFailure = {
 /** A usable response. `errors` is present when GitHub returned data alongside errors. */
 export type GitHubResult<T> = { ok: true; data: T; errors?: GraphQLError[] } | GitHubFailure;
 
+/**
+ * Items gathered across pages. `truncated` is true when paging stopped before the end:
+ * the rate-limit budget ran low, a later page failed (`failure` is set), or the repository
+ * became hidden partway through. The caller reads the budget to tell a rate limit apart.
+ */
+export interface Page<T> {
+  items: T[];
+  truncated: boolean;
+  failure?: GitHubFailure;
+}
+
+/** Shared across one request's calls. Every paged response records its `rateLimit` here. */
+export interface RateBudget {
+  record(rateLimit: RateLimit | undefined): void;
+  /** True once a response reported fewer than `RATE_LIMIT_FLOOR` points remaining. */
+  exhausted(): boolean;
+  /** The reset time from the latest recorded response, as ISO. */
+  resetAt(): string | undefined;
+}
+
+/**
+ * Requests run in parallel, so their replies can arrive out of order: an older reply with more
+ * points left can land after a newer one. Within one rate-limit window the count only falls,
+ * so the budget keeps the lowest it has seen, and starts over only when a later window begins.
+ */
+export function createRateBudget(): RateBudget {
+  let remaining: number | undefined;
+  let reset: string | undefined;
+  return {
+    record(rateLimit) {
+      if (rateLimit === undefined) {
+        return;
+      }
+      if (remaining === undefined || reset === undefined) {
+        remaining = rateLimit.remaining;
+        reset = rateLimit.resetAt;
+        return;
+      }
+      const incoming = Date.parse(rateLimit.resetAt);
+      const current = Date.parse(reset);
+      if (Number.isNaN(incoming) || Number.isNaN(current)) {
+        // Without two comparable times the window is unknown, so the count may only fall.
+        remaining = Math.min(remaining, rateLimit.remaining);
+        if (Number.isNaN(current) && !Number.isNaN(incoming)) {
+          reset = rateLimit.resetAt;
+        }
+      } else if (incoming > current) {
+        remaining = rateLimit.remaining; // a later window has started
+        reset = rateLimit.resetAt;
+      } else if (incoming === current) {
+        remaining = Math.min(remaining, rateLimit.remaining);
+      }
+      // incoming < current: a late reply from an earlier window, ignored
+    },
+    exhausted: () => remaining !== undefined && remaining < RATE_LIMIT_FLOOR,
+    resetAt: () => reset,
+  };
+}
+
 export interface GitHubClient {
   getViewer(token: string): Promise<GitHubResult<Viewer>>;
+  /** The viewer's non-fork repositories pushed at or after `since`, newest-pushed first. */
+  listOwnerRepos(token: string, since: string, budget: RateBudget): Promise<GitHubResult<Page<RepoRef>>>;
+  /**
+   * Every branch commit in `repo` by `author` since `since`. A repository that is `null` or
+   * forbidden to this token yields no items and no failure.
+   */
+  getBranchCommits(
+    token: string,
+    repo: RepoRef,
+    author: { id: string },
+    since: string,
+    budget: RateBudget,
+  ): Promise<GitHubResult<Page<Commit>>>;
 }
 
 type Fetch = (input: string, init: RequestInit) => Promise<globalThis.Response>;
@@ -35,7 +119,11 @@ export function createGitHubClient(options: ClientOptions = {}): GitHubClient {
   const fetchFn: Fetch = options.fetch ?? ((input, init) => fetch(input, init));
   const now = options.now ?? (() => Date.now());
 
-  async function graphql(token: string, query: string): Promise<GitHubResult<unknown>> {
+  async function graphql(
+    token: string,
+    query: string,
+    variables?: Record<string, unknown>,
+  ): Promise<GitHubResult<unknown>> {
     let response: globalThis.Response;
     try {
       response = await fetchFn(GRAPHQL_URL, {
@@ -44,7 +132,7 @@ export function createGitHubClient(options: ClientOptions = {}): GitHubClient {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ query }),
+        body: JSON.stringify(variables === undefined ? { query } : { query, variables }),
       });
     } catch (error) {
       return { ok: false, error: error instanceof TypeError ? 'NETWORK' : 'UNKNOWN' };
@@ -93,7 +181,120 @@ export function createGitHubClient(options: ClientOptions = {}): GitHubClient {
         return { ok: false, error: 'UNKNOWN' };
       }
     },
+
+    async listOwnerRepos(token, since, budget) {
+      const sinceMs = Date.parse(since);
+      const repos: RepoRef[] = [];
+      let cursor: string | null = null;
+
+      for (;;) {
+        const result = await graphql(token, OWNER_REPOS, { cursor });
+        if (!result.ok) {
+          return result;
+        }
+        budget.record(mapRateLimit(result.data));
+        const page = mapRepos(result.data);
+
+        for (const { repo, pushedAt } of page.repos) {
+          if (pushedAt === null) {
+            continue; // never pushed: no commits to find
+          }
+          if (Date.parse(pushedAt) < sinceMs) {
+            return { ok: true, data: { items: repos, truncated: false } };
+          }
+          repos.push(repo);
+        }
+
+        if (page.nextCursor === null) {
+          return { ok: true, data: { items: repos, truncated: false } };
+        }
+        if (budget.exhausted()) {
+          return { ok: true, data: { items: repos, truncated: true } };
+        }
+        cursor = page.nextCursor;
+      }
+    },
+
+    async getBranchCommits(token, repo, author, since, budget) {
+      const commits: Commit[] = [];
+      const base = { owner: repo.owner, name: repo.name, author, since };
+      const stopped = (failure?: GitHubFailure): GitHubResult<Page<Commit>> => ({
+        ok: true,
+        data: failure ? { items: commits, truncated: true, failure } : { items: commits, truncated: true },
+      });
+      let refCursor: string | null = null;
+      let firstPage = true;
+
+      for (;;) {
+        const result = await graphql(token, BRANCH_COMMITS, { ...base, refCursor });
+        if (!result.ok) {
+          return firstPage ? result : stopped(result);
+        }
+        budget.record(mapRateLimit(result.data));
+
+        const page = isRepoHidden(result.errors) ? undefined : mapBranchCommits(result.data, repo);
+        if (page === undefined) {
+          // Hidden from the start: skip the repository. Hidden partway: what is left is lost.
+          return firstPage ? { ok: true, data: { items: [], truncated: false } } : stopped();
+        }
+        firstPage = false;
+        commits.push(...page.commits);
+
+        for (const followUp of page.followUps) {
+          let cursor: string | null = followUp.cursor;
+          while (cursor !== null) {
+            if (budget.exhausted()) {
+              return stopped();
+            }
+            const history = await graphql(token, BRANCH_HISTORY, {
+              ...base,
+              qualifiedName: `refs/heads/${followUp.branch}`,
+              cursor,
+            });
+            if (!history.ok) {
+              return stopped(history);
+            }
+            budget.record(mapRateLimit(history.data));
+            if (isRepoHidden(history.errors) || !hasRepository(history.data)) {
+              return stopped(); // the repository was hidden partway through
+            }
+            const historyPage = mapBranchHistory(history.data, repo, followUp.branch);
+            if (historyPage === undefined) {
+              break; // the branch was deleted since the first page
+            }
+            commits.push(...historyPage.commits);
+            cursor = historyPage.nextCursor;
+          }
+        }
+
+        if (page.nextRefCursor === null) {
+          return { ok: true, data: { items: commits, truncated: false } };
+        }
+        if (budget.exhausted()) {
+          return stopped();
+        }
+        refCursor = page.nextRefCursor;
+      }
+    },
   };
+}
+
+/**
+ * True when an error says the repository itself is not found or forbidden (for example, SAML).
+ * An error deeper inside it, such as one branch's target, does not hide the rest of the page.
+ */
+function isRepoHidden(errors: GraphQLError[] | undefined): boolean {
+  return (errors ?? []).some(
+    (error) =>
+      (error.type === 'FORBIDDEN' || error.type === 'NOT_FOUND') &&
+      error.path?.length === 1 &&
+      error.path[0] === 'repository',
+  );
+}
+
+function hasRepository(data: unknown): boolean {
+  const repository = (data as { repository?: unknown } | null | undefined)?.repository;
+  return typeof repository === 'object' && repository !== null;
 }
 
 function hasRateLimitHeaders(headers: Headers): boolean {

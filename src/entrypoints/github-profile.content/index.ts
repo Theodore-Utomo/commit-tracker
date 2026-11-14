@@ -1,5 +1,44 @@
 import { findContributionGraph, getProfileLogin } from '../../dom/github-page';
 import { sendMessage } from '../../messaging/client';
+import { KEEPALIVE_PORT, type KeepalivePing } from '../../messaging/protocol';
+
+const PING_INTERVAL_MS = 20_000;
+const PING: KeepalivePing = { type: 'PING' };
+
+/**
+ * Holds a port to the worker open and pings it, because a Manifest V3 worker is only kept
+ * alive while messages arrive. Returns the function that stops it. Never throws.
+ */
+function holdWorkerAwake(): () => void {
+  let port: Browser.runtime.Port | undefined;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const stop = (): void => {
+    if (timer !== undefined) {
+      clearInterval(timer);
+      timer = undefined;
+    }
+    try {
+      port?.disconnect();
+    } catch {
+      // the extension was reloaded; the port is already gone
+    }
+    port = undefined;
+  };
+  try {
+    port = browser.runtime.connect({ name: KEEPALIVE_PORT });
+    port.onDisconnect.addListener(stop);
+    timer = setInterval(() => {
+      try {
+        port?.postMessage(PING);
+      } catch {
+        stop();
+      }
+    }, PING_INTERVAL_MS);
+  } catch {
+    stop();
+  }
+  return stop;
+}
 
 export default defineContentScript({
   matches: ['https://github.com/*'],
@@ -25,13 +64,22 @@ function setup(): () => void {
   let intersection: IntersectionObserver | undefined;
   let logged = false;
   let active = true;
+  let stopKeepalive = (): void => {};
 
   const askWorker = async (): Promise<void> => {
+    stopKeepalive = holdWorkerAwake();
     const response = await sendMessage({ type: 'GET_CONTRIBUTIONS', login });
+    stopKeepalive();
     if (!active) {
       return;
     }
-    console.log(response.ok ? response.data.viewerLogin : response.error);
+    if (!response.ok) {
+      console.log(response.error);
+    } else if ('viewerLogin' in response.data) {
+      console.log(response.data.viewerLogin);
+    } else {
+      console.log(`${response.data.totals.commits} commits across all branches`);
+    }
   };
 
   const watchGraph = (graph: Element): void => {
@@ -70,6 +118,7 @@ function setup(): () => void {
 
   return () => {
     active = false;
+    stopKeepalive();
     mutation.disconnect();
     intersection?.disconnect();
   };

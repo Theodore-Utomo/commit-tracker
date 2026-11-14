@@ -34,6 +34,7 @@ Specs import `describe`, `it`, and `expect` from `vitest`. `fake-indexeddb` is l
 - Every module in `src/core/`, with table-driven cases. Time-zone-sensitive code takes an explicit `timeZone` argument, and its tests pass one instead of relying on the machine zone. A test that changes `process.env.TZ` restores it with `delete` when it was unset, and uses a date that crosses a week boundary when shifted (a Sunday). As an occasional check, run `TZ=Pacific/Pago_Pago pnpm exec vitest run tests/unit/core` and the same with `TZ=Pacific/Kiritimati`.
 - `src/services/contributions.ts`, using a fake `GitHubClient` and the in-memory cache. No real GitHub requests.
 - `src/services/github/client.ts` response mapping, with a fake `fetch`. Cover each status and body rule, including the rate-limit header edge cases.
+- `src/services/github/client.ts` paging. Cover every loop exit: a first-page failure versus a later-page failure, a budget stop before a refs page and before a history page, a deleted branch, and a repository hidden on the first page versus a later one. Every paged response must record its `rateLimit`, and a test should prove it. When unsure a test is strong enough, break the line on a scratch copy and confirm a test fails.
 - `src/services/handle-message.ts`, with a fake client and `getToken`. Cover each `ErrorCode`.
 - The pure helpers in `src/messaging/`: `sendMessage` with an injected send function, and `isRequest`.
 - A bug fix gets a test that fails before the fix and passes after it.
@@ -78,10 +79,34 @@ Options page (open it from `chrome://extensions` → Details → Extension optio
 
 Content script and worker (DevTools on a github.com profile, content-script console context):
 
-5. With a valid token, scroll the graph half into view. Two lines log: the profile login, then your viewer login. Scrolling again adds nothing. The page's Network panel shows no `api.github.com` request; the service worker makes it.
+5. With a valid token, scroll the graph half into view. Two lines log: the profile login, then `N commits across all branches` on your own profile, or your viewer login on someone else's. Scrolling again adds nothing. The page's Network panel shows no `api.github.com` request; the service worker makes it.
 6. In the service worker's Network panel, the request is a POST to `https://api.github.com/graphql`. No console line anywhere shows the token, the Authorization header, or raw JSON.
 7. With no token saved, the second line is `NO_TOKEN`, and the service worker makes no request to `api.github.com`.
 8. With an invalid token in storage, the second line is `UNAUTHORIZED`.
 9. Open a profile, reload the extension at `chrome://extensions`, then scroll the old tab to the graph. The login logs, then `UNKNOWN`, with no uncaught "Extension context invalidated" error.
-10. Navigate to a second profile inside GitHub before scrolling the first. Only the second profile's two lines appear.
+10. Navigate to a second profile inside GitHub before scrolling the first. Only the second profile's two lines appear, and no total for the first one ever logs.
 11. After `pnpm build`, `grep -c githubToken .output/chrome-mv3/content-scripts/*.js` and `grep -c api.github.com` on the same files both print `0`.
+
+### Branch commits
+
+DevTools open on your own profile (content-script console context), and the service worker's Network panel open from `chrome://extensions` → service worker → inspect:
+
+1. Scroll the graph half into view. Your login logs, then exactly one `N commits across all branches`. Nothing is added to the page, and no repository name or commit message is logged.
+2. The service worker sends `OwnerRepos`, then `BranchCommits` requests. `variables.author.id` is your node id, and `since` is the grid's first Sunday at local midnight with your offset. No query text contains a branch name; `BranchHistory` passes it as `qualifiedName`. No fork appears.
+3. On someone else's profile, the service worker sends only the viewer query. No `OwnerRepos` or `BranchCommits`.
+4. Push one commit to three branches, then reload. N goes up by exactly 1.
+5. A repository last pushed before the grid start is never named in a `BranchCommits` request.
+6. In an organization with SAML single sign-on and no active session, the total still logs (never `UNKNOWN` or `RATE_LIMITED`), and the organization's repository names appear in no console.
+
+### Worker keepalive
+
+1. Close every DevTools window attached to the service worker first. An open worker DevTools window keeps the worker alive and hides the problem.
+2. Use an account whose fetch takes more than 30 seconds. The total still logs, and `chrome://serviceworker-internals` shows the worker RUNNING throughout.
+3. Navigate inside GitHub before the total logs. No total for the old page appears, and no further pings are sent.
+
+### Rate-limit cutoff
+
+In a scratch build only (never commit it), raise `RATE_LIMIT_FLOOR` in `src/services/github/client.ts`:
+
+1. Above your remaining points: the second line is `RATE_LIMITED`.
+2. A little below your remaining points, so the cutoff lands mid-fetch: a total still logs (a partial count), with no error. The console line shows only the total, not whether it is partial. If the cutoff lands before any commit is kept, the line is `RATE_LIMITED` instead.
