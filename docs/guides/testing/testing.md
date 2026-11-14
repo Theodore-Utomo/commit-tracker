@@ -31,7 +31,7 @@ Specs import `describe`, `it`, and `expect` from `vitest`. `fake-indexeddb` is l
 
 ## What needs a unit test
 
-- Every module in `src/core/`, with table-driven cases.
+- Every module in `src/core/`, with table-driven cases. Time-zone-sensitive code takes an explicit `timeZone` argument, and its tests pass one instead of relying on the machine zone. A test that changes `process.env.TZ` restores it with `delete` when it was unset, and uses a date that crosses a week boundary when shifted (a Sunday). As an occasional check, run `TZ=Pacific/Pago_Pago pnpm exec vitest run tests/unit/core` and the same with `TZ=Pacific/Kiritimati`.
 - `src/services/contributions.ts`, using a fake `GitHubClient` and the in-memory cache. No real GitHub requests.
 - `src/services/github/client.ts` response mapping, with a fake `fetch`. Cover each status and body rule, including the rate-limit header edge cases.
 - `src/services/handle-message.ts`, with a fake client and `getToken`. Cover each `ErrorCode`.

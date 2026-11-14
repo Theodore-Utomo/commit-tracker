@@ -8,7 +8,7 @@ Count the signed-in viewer's commits on every branch, draw the heatmap, add squa
 
 | Order | Status | Plan | Depends on | Purpose |
 | --- | --- | --- | --- | --- |
-| 1 | Pending | `261112-P01-core-library.md` | — | Pure types, dedupe, day grouping, grid, and privacy policies, with tests. |
+| 1 | In Progress | `261112-P01-core-library.md` | — | Pure types, dedupe, day grouping, grid, and privacy policies, with tests. |
 | 2 | Pending | `261112-P02-branch-commits.md` | 1 | Fetch the viewer's branch commits and log the total. |
 | 3 | Pending | `261112-P03-heatmap.md` | 2 | Draw the year heatmap, gated by the prompt. First visible UI. |
 | 4 | Pending | `261112-P04-merged-prs.md` | 2 | Add commits that survived only as a merged pull request, and extra commit emails. |

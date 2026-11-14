@@ -295,9 +295,11 @@ Each privacy mode is a policy object with the same interface:
 interface PrivacyPolicy {
   mode: PrivacyMode; // 'owner' | 'publicPlusCounts' | 'publicOnly'
   includeRepo(repo: RepoRef): boolean;
-  present(commit: Commit): Commit | CountOnly; // strips details when needed
+  present(commit: Commit): Commit | CountOnly | undefined; // strips details when needed
 }
 ```
+
+`present` returns a new object built field by field (unknown fields are dropped), a `CountOnly` for a private commit the mode may only count, or `undefined` when the commit must be dropped (forks in every mode, private repos in `publicOnly`). Callers drop `undefined` before aggregating.
 
 `privacy.ts` exports `policyFor(mode)`. The pipeline never branches on mode itself, so a new mode means a new policy, not edits everywhere.
 
@@ -348,7 +350,7 @@ interface Commit {
 
 interface CountOnly { sha: string; authoredDate: string; private: true }
 
-interface DayBucket { date: string /* YYYY-MM-DD, viewer's local time */; count: number; commits?: Commit[] }
+interface DayBucket { date: string /* YYYY-MM-DD, viewer's local time */; count: number; commits?: (Commit | CountOnly)[] }
 
 interface Contributions {
   login: string;
