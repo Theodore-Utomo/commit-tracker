@@ -90,6 +90,12 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
         failure ??= { ok: false, error: slot.reason instanceof TypeError ? 'NETWORK' : 'UNKNOWN' };
       }
     }
+    // A pass that finished its last page under the floor never starts another repository,
+    // so record the stop here. The early return above does not: no repositories and a low
+    // budget is a complete empty result.
+    if (budget.exhausted()) {
+      stopped = true;
+    }
   }
 
   await collectBranches({ id: viewer.data.id });
@@ -130,11 +136,6 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
         failure ??= prs.data.failure;
       }
     }
-  } else if (!stopped && failure === undefined && budget.exhausted() && repos.data.items.length > 0) {
-    if (gathered.length === 0) {
-      return rateLimited(budget);
-    }
-    stopped = true;
   }
 
   const policy = policyFor('owner');

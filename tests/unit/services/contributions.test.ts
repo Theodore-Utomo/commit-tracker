@@ -518,6 +518,31 @@ describe('getContributions: merged pull requests and extra emails', () => {
     });
   });
 
+  it('marks partial and does not search when the only repository ends under the rate-limit floor', async () => {
+    const a = repo('a');
+    const client = fakeClient({
+      repos: [a],
+      branches: { a: { result: page([commit('k1', a)]), rateLimit: LOW } },
+    });
+    const data = contributions(await getContributions('monalisa', deps(client)));
+    expect(data.partial).toBe(true);
+    expect(data.totals.commits).toBe(1);
+    expect(client.getMergedPrCommits).not.toHaveBeenCalled();
+  });
+
+  it('returns RATE_LIMITED when that repository kept nothing', async () => {
+    const client = fakeClient({
+      repos: [repo('a')],
+      branches: { a: { result: page([]), rateLimit: LOW } },
+    });
+    await expect(getContributions('monalisa', deps(client))).resolves.toStrictEqual({
+      ok: false,
+      error: 'RATE_LIMITED',
+      resetAt: LOW.resetAt,
+    });
+    expect(client.getMergedPrCommits).not.toHaveBeenCalled();
+  });
+
   it('does not search merged pull requests when the branch phase already stopped', async () => {
     const a = repo('a');
     const client = fakeClient({
