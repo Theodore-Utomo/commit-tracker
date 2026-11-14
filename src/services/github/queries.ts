@@ -44,6 +44,41 @@ export const BRANCH_COMMITS = `query BranchCommits($owner: String!, $name: Strin
   rateLimit { remaining resetAt }
 }`;
 
+/**
+ * One page of merged pull requests authored by `$q`'s login. `commits` is only the first page;
+ * a longer list continues with `PR_COMMITS`. The login is a search variable, never pasted into this text.
+ */
+export const MERGED_PR_COMMITS = `query MergedPrCommits($q: String!, $cursor: String) {
+  search(query: $q, type: ISSUE, first: 25, after: $cursor) {
+    issueCount
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on PullRequest {
+        number
+        repository { owner { login } name isPrivate isFork }
+        commits(first: 100) {
+          pageInfo { hasNextPage endCursor }
+          nodes { commit { oid authoredDate messageHeadline author { email user { login } } } }
+        }
+      }
+    }
+  }
+  rateLimit { remaining resetAt }
+}`;
+
+/** The next page of one merged pull request's commits. */
+export const PR_COMMITS = `query PrCommits($owner: String!, $name: String!, $number: Int!, $cursor: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      commits(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { commit { oid authoredDate messageHeadline author { email user { login } } } }
+      }
+    }
+  }
+  rateLimit { remaining resetAt }
+}`;
+
 /** The next page of one branch's history. The branch arrives as `$qualifiedName`, never in the query text. */
 export const BRANCH_HISTORY = `query BranchHistory($owner: String!, $name: String!, $qualifiedName: String!, $author: CommitAuthor!, $since: GitTimestamp!, $cursor: String!) {
   repository(owner: $owner, name: $name) {

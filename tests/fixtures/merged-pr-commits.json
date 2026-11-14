@@ -1,0 +1,117 @@
+{
+  "data": {
+    "search": {
+      "issueCount": 2,
+      "pageInfo": { "hasNextPage": false, "endCursor": null },
+      "nodes": [
+        {
+          "number": 7,
+          "repository": { "owner": { "login": "acme" }, "name": "widgets", "isPrivate": false, "isFork": false },
+          "commits": {
+            "pageInfo": { "hasNextPage": false, "endCursor": null },
+            "nodes": [
+              {
+                "commit": {
+                  "oid": "aaa111",
+                  "authoredDate": "2024-01-10T15:00:00Z",
+                  "messageHeadline": "Squash the widget",
+                  "author": { "email": "mona@users.noreply.github.com", "user": { "login": "monalisa" } }
+                }
+              },
+              {
+                "commit": {
+                  "oid": "bbb222",
+                  "authoredDate": "2024-01-09T15:00:00Z",
+                  "messageHeadline": "Same person, different case",
+                  "author": { "email": "mona@users.noreply.github.com", "user": { "login": "MonaLisa" } }
+                }
+              },
+              {
+                "commit": {
+                  "oid": "ccc333",
+                  "authoredDate": "2024-01-08T15:00:00Z",
+                  "messageHeadline": "From the extra email",
+                  "author": { "email": "dev@example.com", "user": null }
+                }
+              },
+              {
+                "commit": {
+                  "oid": "ddd444",
+                  "authoredDate": "2024-01-08T16:00:00Z",
+                  "messageHeadline": "Email case differs",
+                  "author": { "email": "DEV@example.com", "user": null }
+                }
+              },
+              {
+                "commit": {
+                  "oid": "eee555",
+                  "authoredDate": "2024-01-08T17:00:00Z",
+                  "messageHeadline": "Someone else",
+                  "author": { "email": "dev@example.com", "user": { "login": "other" } }
+                }
+              },
+              {
+                "commit": {
+                  "oid": "fff666",
+                  "authoredDate": "2024-01-08T18:00:00Z",
+                  "messageHeadline": "Unlinked other email",
+                  "author": { "email": "other@example.com", "user": null }
+                }
+              },
+              {
+                "commit": {
+                  "oid": "ggg777",
+                  "authoredDate": "2024-01-08T19:00:00Z",
+                  "messageHeadline": "No author",
+                  "author": null
+                }
+              },
+              {
+                "commit": {
+                  "oid": "hhh888",
+                  "messageHeadline": "No date",
+                  "author": { "email": "dev@example.com", "user": null }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "number": 8,
+          "repository": null,
+          "commits": {
+            "pageInfo": { "hasNextPage": false, "endCursor": null },
+            "nodes": [
+              {
+                "commit": {
+                  "oid": "iii999",
+                  "authoredDate": "2024-01-10T15:00:00Z",
+                  "messageHeadline": "Hidden repo",
+                  "author": { "email": "dev@example.com", "user": { "login": "monalisa" } }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "number": 9,
+          "repository": { "owner": { "login": "acme" }, "name": "secret", "isPrivate": true, "isFork": false },
+          "commits": {
+            "pageInfo": { "hasNextPage": false, "endCursor": null },
+            "nodes": [
+              {
+                "commit": {
+                  "oid": "jjj000",
+                  "authoredDate": "2024-01-10T12:00:00Z",
+                  "messageHeadline": "Private repo",
+                  "author": { "email": "mona@users.noreply.github.com", "user": { "login": "monalisa" } }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "rateLimit": { "remaining": 4800, "resetAt": "2024-01-11T13:00:00Z" }
+  }
+}

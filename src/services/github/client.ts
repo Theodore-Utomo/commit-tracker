@@ -1,14 +1,17 @@
+import { LOGIN_PATTERN } from '../../core/login';
 import type { Commit, RepoRef } from '../../core/types';
 import {
   mapBranchCommits,
   mapBranchHistory,
+  mapMergedPrSearch,
+  mapPrCommitPage,
   mapRateLimit,
   mapRepos,
   mapViewer,
   type RateLimit,
   type Viewer,
 } from './mappers';
-import { BRANCH_COMMITS, BRANCH_HISTORY, OWNER_REPOS, VIEWER_QUERY } from './queries';
+import { BRANCH_COMMITS, BRANCH_HISTORY, MERGED_PR_COMMITS, OWNER_REPOS, PR_COMMITS, VIEWER_QUERY } from './queries';
 
 const GRAPHQL_URL = 'https://api.github.com/graphql';
 
@@ -90,6 +93,9 @@ export function createRateBudget(): RateBudget {
   };
 }
 
+/** `CommitAuthor` as this client sends it: the viewer's node id, or saved commit emails. */
+export type CommitAuthor = { id: string } | { emails: readonly string[] };
+
 export interface GitHubClient {
   getViewer(token: string): Promise<GitHubResult<Viewer>>;
   /** The viewer's non-fork repositories pushed at or after `since`, newest-pushed first. */
@@ -101,8 +107,21 @@ export interface GitHubClient {
   getBranchCommits(
     token: string,
     repo: RepoRef,
-    author: { id: string },
+    author: CommitAuthor,
     since: string,
+    budget: RateBudget,
+  ): Promise<GitHubResult<Page<Commit>>>;
+  /**
+   * Commits on pull requests merged on or after `mergedSince` (`YYYY-MM-DD`) whose author is
+   * `login`. A login that fails `LOGIN_PATTERN` yields no items and makes no request.
+   * `savedEmails` keep commits that have no linked user. GitHub search stops at 1,000 hits;
+   * a larger `issueCount` comes back `truncated`.
+   */
+  getMergedPrCommits(
+    token: string,
+    login: string,
+    mergedSince: string,
+    savedEmails: readonly string[],
     budget: RateBudget,
   ): Promise<GitHubResult<Page<Commit>>>;
 }
@@ -276,6 +295,75 @@ export function createGitHubClient(options: ClientOptions = {}): GitHubClient {
         refCursor = page.nextRefCursor;
       }
     },
+
+    async getMergedPrCommits(token, login, mergedSince, savedEmails, budget) {
+      if (!LOGIN_PATTERN.test(login)) {
+        return { ok: true, data: { items: [], truncated: false } };
+      }
+      // The pattern excludes spaces and search operators, so the login cannot change the query.
+      const q = `author:${login} is:pr is:merged merged:>=${mergedSince}`;
+      const commits: Commit[] = [];
+      const cut = (failure?: GitHubFailure): GitHubResult<Page<Commit>> => ({
+        ok: true,
+        data: failure ? { items: commits, truncated: true, failure } : { items: commits, truncated: true },
+      });
+      let cursor: string | null = null;
+      let firstPage = true;
+      let capped = false;
+
+      for (;;) {
+        const result = await graphql(token, MERGED_PR_COMMITS, { q, cursor });
+        if (!result.ok) {
+          return firstPage ? result : cut(result);
+        }
+        budget.record(mapRateLimit(result.data));
+        const page = mapMergedPrSearch(result.data, login, savedEmails, forbiddenNodeIndexes(result.errors));
+        if (page === undefined) {
+          return firstPage ? { ok: false, error: 'UNKNOWN' } : cut();
+        }
+        firstPage = false;
+        if (page.issueCount > 1000) {
+          capped = true; // GitHub search returns at most 1,000 hits
+        }
+        commits.push(...page.commits);
+
+        for (const followUp of page.followUps) {
+          let prCursor: string | null = followUp.cursor;
+          while (prCursor !== null) {
+            if (budget.exhausted()) {
+              return cut();
+            }
+            const more = await graphql(token, PR_COMMITS, {
+              owner: followUp.repo.owner,
+              name: followUp.repo.name,
+              number: followUp.number,
+              cursor: prCursor,
+            });
+            if (!more.ok) {
+              return cut(more);
+            }
+            budget.record(mapRateLimit(more.data));
+            if (hidesPullRequest(more.errors)) {
+              break; // this pull request only; the rest of the search continues
+            }
+            const prPage = mapPrCommitPage(more.data, followUp.repo, login, savedEmails);
+            if (prPage === undefined) {
+              break;
+            }
+            commits.push(...prPage.commits);
+            prCursor = prPage.nextCursor;
+          }
+        }
+
+        if (page.nextCursor === null) {
+          return { ok: true, data: { items: commits, truncated: capped } };
+        }
+        if (budget.exhausted()) {
+          return cut();
+        }
+        cursor = page.nextCursor;
+      }
+    },
   };
 }
 
@@ -290,6 +378,29 @@ function isRepoHidden(errors: GraphQLError[] | undefined): boolean {
       error.path?.length === 1 &&
       error.path[0] === 'repository',
   );
+}
+
+/** Indexes of `search.nodes` that a `FORBIDDEN` error points at. Those pull requests are skipped. */
+function forbiddenNodeIndexes(errors: GraphQLError[] | undefined): Set<number> {
+  const indexes = new Set<number>();
+  for (const error of errors ?? []) {
+    if (error.type !== 'FORBIDDEN' || error.path === undefined) {
+      continue;
+    }
+    for (let i = 0; i < error.path.length - 1; i += 1) {
+      const index = error.path[i + 1];
+      if (error.path[i] === 'nodes' && typeof index === 'number') {
+        indexes.add(index);
+        break;
+      }
+    }
+  }
+  return indexes;
+}
+
+/** A follow-up is one pull request, so any forbidden or missing error skips the rest of it. */
+function hidesPullRequest(errors: GraphQLError[] | undefined): boolean {
+  return (errors ?? []).some((error) => error.type === 'FORBIDDEN' || error.type === 'NOT_FOUND');
 }
 
 function hasRepository(data: unknown): boolean {

@@ -4,6 +4,7 @@ import type { RepoRef } from '../../../../src/core/types';
 import {
   mapBranchCommits,
   mapBranchHistory,
+  mapMergedPrCommits,
   mapRateLimit,
   mapRepos,
   mapViewer,
@@ -198,5 +199,90 @@ describe('mapper validation', () => {
 
   it('mapBranchCommits returns an empty page when refs is missing', () => {
     expect(mapBranchCommits({ repository: {} }, repo)).toEqual({ commits: [], followUps: [], nextRefCursor: null });
+  });
+});
+
+describe('mapMergedPrCommits', () => {
+  const merged = JSON.parse(
+    readFileSync(new URL('../../../fixtures/merged-pr-commits.json', import.meta.url), 'utf8'),
+  ) as { data: { search: { nodes: unknown[] } } };
+  const nodes = merged.data.search.nodes;
+  const widgets = { owner: 'acme', name: 'widgets', isPrivate: false, isFork: false };
+
+  it('turns a pull-request commit into source "pr" and omits the branch and the email', () => {
+    const [first] = mapMergedPrCommits(nodes, 'monalisa', ['dev@example.com']);
+    expect(first).toEqual({
+      sha: 'aaa111',
+      authoredDate: '2024-01-10T15:00:00Z',
+      messageHeadline: 'Squash the widget',
+      repo: widgets,
+      source: 'pr',
+    });
+    expect(first).not.toHaveProperty('branch');
+    expect(first).not.toHaveProperty('email');
+  });
+
+  it('omits a different login, and keeps a null user only when the saved email matches', () => {
+    const kept = mapMergedPrCommits(nodes, 'monalisa', ['dev@example.com']).map((commit) => commit.sha);
+    expect(kept).toEqual(['aaa111', 'bbb222', 'ccc333', 'ddd444', 'jjj000']);
+
+    const withoutEmails = mapMergedPrCommits(nodes, 'monalisa', []).map((commit) => commit.sha);
+    expect(withoutEmails).toEqual(['aaa111', 'bbb222', 'jjj000']);
+
+    const missingUser = mapMergedPrCommits(
+      [
+        {
+          repository: { owner: { login: 'acme' }, name: 'widgets', isPrivate: false, isFork: false },
+          commits: {
+            nodes: [
+              {
+                commit: {
+                  oid: 'missing-user',
+                  authoredDate: '2024-01-10T15:00:00Z',
+                  messageHeadline: 'No user field',
+                  author: { email: 'dev@example.com' },
+                },
+              },
+            ],
+          },
+        },
+      ],
+      'monalisa',
+      ['dev@example.com'],
+    );
+    expect(missingUser).toEqual([]);
+  });
+
+  it('keeps a private repository commit and a fork commit for the pipeline to filter', () => {
+    const kept = mapMergedPrCommits(nodes, 'monalisa', ['dev@example.com']);
+    expect(kept.find((commit) => commit.sha === 'jjj000')?.repo).toEqual({
+      owner: 'acme',
+      name: 'secret',
+      isPrivate: true,
+      isFork: false,
+    });
+    const fork = mapMergedPrCommits(
+      [
+        {
+          number: 3,
+          repository: { owner: { login: 'acme' }, name: 'forked', isPrivate: false, isFork: true },
+          commits: {
+            nodes: [
+              {
+                commit: {
+                  oid: 'fork1',
+                  authoredDate: '2024-01-10T15:00:00Z',
+                  messageHeadline: 'On a fork',
+                  author: { user: { login: 'monalisa' } },
+                },
+              },
+            ],
+          },
+        },
+      ],
+      'monalisa',
+      [],
+    );
+    expect(fork[0]?.repo.isFork).toBe(true);
   });
 });

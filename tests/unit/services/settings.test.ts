@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
-import { getToken, hasToken, setToken } from '../../../src/services/settings';
+import { getCommitEmails, getToken, hasToken, setCommitEmails, setToken } from '../../../src/services/settings';
 
 describe('token settings', () => {
   beforeEach(() => {
@@ -34,5 +34,30 @@ describe('token settings', () => {
 
     await expect(getToken()).resolves.toBeUndefined();
     await expect(fakeBrowser.storage.local.get('githubToken')).resolves.toEqual({});
+  });
+});
+
+describe('commit emails', () => {
+  beforeEach(() => {
+    fakeBrowser.reset();
+  });
+
+  it('defaults to an empty list', async () => {
+    await expect(getCommitEmails()).resolves.toEqual([]);
+  });
+
+  it('round-trips a list under local:commitEmails', async () => {
+    await setCommitEmails(['dev@example.com', 'other@example.com']);
+
+    await expect(getCommitEmails()).resolves.toEqual(['dev@example.com', 'other@example.com']);
+    await expect(fakeBrowser.storage.local.get('commitEmails')).resolves.toEqual({
+      commitEmails: ['dev@example.com', 'other@example.com'],
+    });
+  });
+
+  it('drops blank entries and trims the rest', async () => {
+    await setCommitEmails(['  dev@example.com  ', '', '   ', 'other@example.com']);
+
+    await expect(getCommitEmails()).resolves.toEqual(['dev@example.com', 'other@example.com']);
   });
 });

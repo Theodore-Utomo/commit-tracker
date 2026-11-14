@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Commit, Contributions, RepoRef } from '../../../src/core/types';
 import type { Response } from '../../../src/messaging/protocol';
-import type { GitHubResult, Page, RateBudget } from '../../../src/services/github/client';
+import type { CommitAuthor, GitHubResult, Page, RateBudget } from '../../../src/services/github/client';
 import { getContributions, type ContributionsDeps } from '../../../src/services/contributions';
 
 const NEW_YORK = 'America/New_York';
@@ -40,6 +40,9 @@ function fakeClient(options: {
   reposRateLimit?: typeof PLENTY;
   listResult?: GitHubResult<Page<RepoRef>>;
   branches?: Record<string, BranchAnswer>;
+  /** Answers for the `author: { emails }` pass. A missing repo answers with no commits. */
+  emailBranches?: Record<string, BranchAnswer>;
+  prs?: GitHubResult<Page<Commit>>;
   viewer?: GitHubResult<typeof VIEWER>;
 }) {
   const client = {
@@ -49,20 +52,43 @@ function fakeClient(options: {
       budget.record(options.reposRateLimit ?? PLENTY);
       return options.listResult ?? page(options.repos ?? []);
     }),
-    getBranchCommits: vi.fn(
-      async (_token: string, r: RepoRef, _author: { id: string }, _since: string, budget: RateBudget) => {
-        await Promise.resolve();
-        const answer = options.branches?.[r.name] ?? { result: page<Commit>([]) };
-        budget.record(answer.rateLimit ?? PLENTY);
-        return answer.result;
-      },
-    ),
+    getBranchCommits: vi.fn(async (_token: string, r: RepoRef, author: CommitAuthor, _since: string, budget: RateBudget) => {
+      await Promise.resolve();
+      const table = 'emails' in author ? options.emailBranches : options.branches;
+      const answer = table?.[r.name] ?? { result: page<Commit>([]) };
+      budget.record(answer.rateLimit ?? PLENTY);
+      return answer.result;
+    }),
+    getMergedPrCommits: vi.fn(async () => options.prs ?? page<Commit>([])),
   } satisfies ContributionsDeps['client'];
   return client;
 }
 
-function deps(client: ContributionsDeps['client'], options: { token?: string | undefined } = { token: 'token' }): ContributionsDeps {
-  return { client, getToken: async () => options.token, now: () => NOW, timeZone: NEW_YORK };
+function deps(
+  client: ContributionsDeps['client'],
+  options?: { token?: string | undefined; emails?: readonly string[] },
+): ContributionsDeps {
+  // A missing argument uses a token. Passing `token: undefined` is the no-token case.
+  const token = options !== undefined && 'token' in options ? options.token : 'token';
+  return {
+    client,
+    getToken: async () => token,
+    getCommitEmails: vi.fn(async () => options?.emails ?? []),
+    now: () => NOW,
+    timeZone: NEW_YORK,
+  };
+}
+
+/** A pull-request commit: `source: 'pr'` and no branch name. */
+function prOnly(sha: string, r: RepoRef, overrides: Partial<Commit> = {}): Commit {
+  return {
+    sha,
+    authoredDate: '2024-01-10T15:00:00Z',
+    messageHeadline: `commit ${sha}`,
+    repo: r,
+    source: 'pr',
+    ...overrides,
+  };
 }
 
 function contributions(response: Response): Contributions {
@@ -76,8 +102,10 @@ describe('getContributions: who is asked', () => {
   it('returns NO_TOKEN without calling GitHub when the token is missing or blank', async () => {
     for (const token of [undefined, '  ']) {
       const client = fakeClient({});
-      await expect(getContributions('monalisa', deps(client, { token }))).resolves.toEqual({ ok: false, error: 'NO_TOKEN' });
+      const dependencies = deps(client, { token });
+      await expect(getContributions('monalisa', dependencies)).resolves.toEqual({ ok: false, error: 'NO_TOKEN' });
       expect(client.getViewer).not.toHaveBeenCalled();
+      expect(dependencies.getCommitEmails).not.toHaveBeenCalled();
     }
   });
 
@@ -97,12 +125,15 @@ describe('getContributions: who is asked', () => {
 
   it('returns { viewerLogin } for another login and fetches nothing more', async () => {
     const client = fakeClient({ repos: [repo('a')] });
-    await expect(getContributions('octocat', deps(client))).resolves.toEqual({
+    const dependencies = deps(client);
+    await expect(getContributions('octocat', dependencies)).resolves.toEqual({
       ok: true,
       data: { viewerLogin: 'monalisa' },
     });
     expect(client.listOwnerRepos).not.toHaveBeenCalled();
     expect(client.getBranchCommits).not.toHaveBeenCalled();
+    expect(client.getMergedPrCommits).not.toHaveBeenCalled();
+    expect(dependencies.getCommitEmails).not.toHaveBeenCalled();
   });
 
   it('treats the viewer login case-insensitively', async () => {
@@ -119,6 +150,7 @@ describe('getContributions: owner fetch', () => {
     const client = fakeClient({ repos: [a] });
     await getContributions('monalisa', deps(client));
     expect(client.listOwnerRepos).toHaveBeenCalledWith('token', SINCE, expect.anything());
+    expect(client.getBranchCommits).toHaveBeenCalledTimes(1);
     expect(client.getBranchCommits).toHaveBeenCalledWith('token', a, { id: 'U_viewer' }, SINCE, expect.anything());
   });
 
@@ -382,5 +414,202 @@ describe('getContributions: edges the first tests missed', () => {
       resetAt: LOW.resetAt,
     });
     expect(client.getBranchCommits).not.toHaveBeenCalled();
+  });
+});
+
+describe('getContributions: merged pull requests and extra emails', () => {
+  it('includes a commit that only the merged-pull-request search returns', async () => {
+    const a = repo('a');
+    const only = prOnly('pr1', a, { messageHeadline: 'Squashed' });
+    const client = fakeClient({ repos: [a], prs: page([only]) });
+    const data = contributions(await getContributions('monalisa', deps(client)));
+    expect(data.totals.commits).toBe(1);
+    expect(data.partial).toBe(false);
+    expect(data.days['2024-01-10']?.commits).toEqual([only]);
+  });
+
+  it('keeps one copy when a SHA comes from a branch and a pull request, and the copy is the branch one', async () => {
+    const a = repo('a');
+    const client = fakeClient({
+      repos: [a],
+      branches: { a: { result: page([commit('s1', a)]) } },
+      prs: page([prOnly('s1', a, { messageHeadline: 'from the pull request' })]),
+    });
+    const data = contributions(await getContributions('monalisa', deps(client)));
+    expect(data.totals.commits).toBe(1);
+    expect(data.days['2024-01-10']?.commits).toEqual([commit('s1', a)]);
+  });
+
+  it('searches with the viewer login and the grid start, not the URL text', async () => {
+    const client = fakeClient({ repos: [] });
+    await getContributions('MonaLisa', deps(client));
+    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', '2023-01-08', [], expect.anything());
+  });
+
+  it('does not count a pull-request commit authored before the grid start', async () => {
+    const a = repo('a');
+    const client = fakeClient({
+      repos: [a],
+      prs: page([prOnly('early', a, { authoredDate: '2023-01-08T04:00:00Z' })]),
+    });
+    expect(contributions(await getContributions('monalisa', deps(client))).totals.commits).toBe(0);
+  });
+
+  it('fetches each repository again with the saved emails and counts a shared SHA once', async () => {
+    const a = repo('a');
+    const emails = ['dev@example.com'];
+    const client = fakeClient({
+      repos: [a],
+      branches: { a: { result: page([commit('s1', a)]) } },
+      emailBranches: {
+        a: { result: page([commit('s1', a, { branch: 'feature' }), commit('e1', a)]) },
+      },
+    });
+    const data = contributions(await getContributions('monalisa', deps(client, { emails })));
+    expect(client.getBranchCommits).toHaveBeenNthCalledWith(1, 'token', a, { id: 'U_viewer' }, SINCE, expect.anything());
+    expect(client.getBranchCommits).toHaveBeenNthCalledWith(2, 'token', a, { emails }, SINCE, expect.anything());
+    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', '2023-01-08', emails, expect.anything());
+    expect(data.totals.commits).toBe(2);
+    expect(data.days['2024-01-10']?.commits).toEqual([commit('s1', a), commit('e1', a)]);
+  });
+
+  it('does not fetch by email when every saved entry is blank', async () => {
+    const a = repo('a');
+    const client = fakeClient({ repos: [a], branches: { a: { result: page([commit('s1', a)]) } } });
+    await getContributions('monalisa', deps(client, { emails: ['  ', ''] }));
+    expect(client.getBranchCommits).toHaveBeenCalledTimes(1);
+    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', '2023-01-08', [], expect.anything());
+  });
+
+  it('keeps the branch commit and marks partial when the pull-request search is rate limited or the network fails', async () => {
+    for (const error of ['RATE_LIMITED', 'NETWORK'] as const) {
+      const a = repo('a');
+      const failure =
+        error === 'RATE_LIMITED'
+          ? ({ ok: false, error, resetAt: LOW.resetAt } as const)
+          : ({ ok: false, error } as const);
+      const client = fakeClient({
+        repos: [a],
+        branches: { a: { result: page([commit('k1', a)]) } },
+        prs: failure,
+      });
+      const data = contributions(await getContributions('monalisa', deps(client)));
+      expect(data.partial).toBe(true);
+      expect(data.totals.commits).toBe(1);
+      expect(data.days['2024-01-10']?.commits).toEqual([commit('k1', a)]);
+    }
+  });
+
+  it('drops a pull-request commit from a fork', async () => {
+    const fork = repo('fork', { isFork: true });
+    const client = fakeClient({ repos: [fork], prs: page([prOnly('f1', fork)]) });
+    expect(contributions(await getContributions('monalisa', deps(client))).totals.commits).toBe(0);
+  });
+
+  it('returns RATE_LIMITED when the search fails before any commit is kept', async () => {
+    const client = fakeClient({
+      repos: [repo('a')],
+      prs: { ok: false, error: 'RATE_LIMITED', resetAt: LOW.resetAt },
+    });
+    await expect(getContributions('monalisa', deps(client))).resolves.toStrictEqual({
+      ok: false,
+      error: 'RATE_LIMITED',
+      resetAt: LOW.resetAt,
+    });
+  });
+
+  it('marks partial and does not search when the only repository ends under the rate-limit floor', async () => {
+    const a = repo('a');
+    const client = fakeClient({
+      repos: [a],
+      branches: { a: { result: page([commit('k1', a)]), rateLimit: LOW } },
+    });
+    const data = contributions(await getContributions('monalisa', deps(client)));
+    expect(data.partial).toBe(true);
+    expect(data.totals.commits).toBe(1);
+    expect(client.getMergedPrCommits).not.toHaveBeenCalled();
+  });
+
+  it('returns RATE_LIMITED when that repository kept nothing', async () => {
+    const client = fakeClient({
+      repos: [repo('a')],
+      branches: { a: { result: page([]), rateLimit: LOW } },
+    });
+    await expect(getContributions('monalisa', deps(client))).resolves.toStrictEqual({
+      ok: false,
+      error: 'RATE_LIMITED',
+      resetAt: LOW.resetAt,
+    });
+    expect(client.getMergedPrCommits).not.toHaveBeenCalled();
+  });
+
+  it('keeps the id-pass commit when the email pass fails, and does not search', async () => {
+    for (const error of ['RATE_LIMITED', 'NETWORK'] as const) {
+      const a = repo('a');
+      const failure =
+        error === 'RATE_LIMITED'
+          ? ({ ok: false, error, resetAt: LOW.resetAt } as const)
+          : ({ ok: false, error } as const);
+      const client = fakeClient({
+        repos: [a],
+        branches: { a: { result: page([commit('k1', a)]) } },
+        emailBranches: { a: { result: failure } },
+      });
+      const data = contributions(await getContributions('monalisa', deps(client, { emails: ['dev@example.com'] })));
+      expect(data.partial).toBe(true);
+      expect(data.days['2024-01-10']?.commits).toEqual([commit('k1', a)]);
+      expect(client.getBranchCommits).toHaveBeenCalledTimes(2);
+      expect(client.getMergedPrCommits).not.toHaveBeenCalled();
+    }
+  });
+
+  it('includes pull-request commits and marks partial when the search stops early', async () => {
+    const a = repo('a');
+    const pr = prOnly('pr1', a);
+    for (const prs of [
+      { ok: true as const, data: { items: [pr], truncated: true } },
+      {
+        ok: true as const,
+        data: { items: [pr], truncated: true, failure: { ok: false as const, error: 'NETWORK' as const } },
+      },
+    ]) {
+      const client = fakeClient({
+        repos: [a],
+        branches: { a: { result: page([commit('k1', a)]) } },
+        prs,
+      });
+      const data = contributions(await getContributions('monalisa', deps(client)));
+      expect(data.partial).toBe(true);
+      expect(data.days['2024-01-10']?.commits).toEqual([commit('k1', a), pr]);
+    }
+  });
+
+  it('does not fetch emails or search after a branch failure that already kept a commit', async () => {
+    const a = repo('a');
+    const b = repo('b');
+    const client = fakeClient({
+      repos: [a, b],
+      branches: {
+        a: { result: page([commit('k1', a)]) },
+        b: { result: { ok: false, error: 'RATE_LIMITED', resetAt: LOW.resetAt } },
+      },
+    });
+    const data = contributions(await getContributions('monalisa', deps(client, { emails: ['dev@example.com'] })));
+    expect(data.partial).toBe(true);
+    expect(data.totals.commits).toBe(1);
+    expect(client.getBranchCommits).toHaveBeenCalledTimes(2);
+    expect(client.getMergedPrCommits).not.toHaveBeenCalled();
+  });
+
+  it('does not search merged pull requests when the branch phase already stopped', async () => {
+    const a = repo('a');
+    const client = fakeClient({
+      repos: [a],
+      branches: { a: { result: page([commit('k1', a)], true) } },
+    });
+    const data = contributions(await getContributions('monalisa', deps(client)));
+    expect(data.partial).toBe(true);
+    expect(data.totals.commits).toBe(1);
+    expect(client.getMergedPrCommits).not.toHaveBeenCalled();
   });
 });

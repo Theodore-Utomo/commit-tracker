@@ -76,24 +76,25 @@ Options page (open it from `chrome://extensions` → Details → Extension optio
 2. Save with the input empty or only spaces. `Enter a token first.` appears, and extension storage has no `githubToken` key.
 3. Save a valid token. `Token saved.` and `A token is saved.` appear, and the input is empty.
 4. Close and reopen the page. `A token is saved.` shows, and the input is empty, `type="password"`, with no placeholder. Searching the Elements panel for the token finds nothing. The Always show checkbox round-trips: check it, reopen, and it stays checked; uncheck it, reopen, and it stays unchecked.
+5. Extra commit emails starts empty. Save ` dev@example.com `, a blank line, `a@example.com, b@example.com`, and `other@example.com`. The status says `Emails saved.` The field shows those four addresses, one per line, and reopening the page shows the same four. No console line contains an address.
 
 Content script and worker (DevTools on a github.com profile, content-script console context). Always show is off unless a step says otherwise. Nothing is fetched until Accept.
 
-5. With a valid token, scroll the graph half into view. The button `See commits across all branches` appears and no GraphQL request has been sent. Click it. The button is disabled and the shadow tree shows `Loading commits…`. On your own profile the heading `All commits across branches` then appears. On someone else's profile the prompt disappears and no heatmap is drawn. Scrolling again adds nothing. The page's Network panel shows no `api.github.com` request; the service worker makes it.
-6. In the service worker's Network panel, after Accept (or as soon as the graph is half visible when Always show is on), the request is a POST to `https://api.github.com/graphql`. No console line anywhere shows the token, the Authorization header, or raw JSON.
-7. With no token saved, Accept shows `NO_TOKEN` and the button is enabled again. The service worker makes no request to `api.github.com`. Click Accept again. `NO_TOKEN` shows again, and the button is not left disabled.
-8. With an invalid token in storage, Accept shows `UNAUTHORIZED` and the button is enabled again.
-9. Open a profile, reload the extension at `chrome://extensions`, then scroll the old tab to the graph and click Accept. The shadow tree shows `UNKNOWN`, with no uncaught "Extension context invalidated" error.
-10. Navigate to a second profile inside GitHub before scrolling the first. Only the second profile's prompt appears, and no heatmap for the first one is left on the page.
-11. After `pnpm build`, `grep -c githubToken .output/chrome-mv3/content-scripts/*.js` and `grep -c api.github.com` on the same files both print `0`.
+6. With a valid token, scroll the graph half into view. The button `See commits across all branches` appears and no GraphQL request has been sent. Click it. The button is disabled and the shadow tree shows `Loading commits…`. On your own profile the heading `All commits across branches` then appears. On someone else's profile the prompt disappears and no heatmap is drawn. Scrolling again adds nothing. The page's Network panel shows no `api.github.com` request; the service worker makes it.
+7. In the service worker's Network panel, after Accept (or as soon as the graph is half visible when Always show is on), the request is a POST to `https://api.github.com/graphql`. No console line anywhere shows the token, the Authorization header, or raw JSON.
+8. With no token saved, Accept shows `NO_TOKEN` and the button is enabled again. The service worker makes no request to `api.github.com`. Click Accept again. `NO_TOKEN` shows again, and the button is not left disabled.
+9. With an invalid token in storage, Accept shows `UNAUTHORIZED` and the button is enabled again.
+10. Open a profile, reload the extension at `chrome://extensions`, then scroll the old tab to the graph and click Accept. The shadow tree shows `UNKNOWN`, with no uncaught "Extension context invalidated" error.
+11. Navigate to a second profile inside GitHub before scrolling the first. Only the second profile's prompt appears, and no heatmap for the first one is left on the page.
+12. After `pnpm build`, `grep -c githubToken .output/chrome-mv3/content-scripts/*.js` and `grep -c api.github.com` on the same files both print `0`.
 
 ### Branch commits
 
 DevTools open on your own profile (content-script console context), and the service worker's Network panel open from `chrome://extensions` → service worker → inspect:
 
 1. Scroll the graph half into view and click Accept. The heading `All commits across branches` appears, with a 53 by 7 grid. No repository name or commit message is shown. With Always show on, the same heatmap appears without the button, after the graph is half visible.
-2. After Accept (or after the graph is half visible, when Always show is on), the service worker sends `OwnerRepos`, then `BranchCommits` requests. `variables.author.id` is your node id, and `since` is the grid's first Sunday at local midnight with your offset. No query text contains a branch name; `BranchHistory` passes it as `qualifiedName`. No fork appears.
-3. On someone else's profile, click Accept. The service worker sends only the viewer query. No `OwnerRepos` or `BranchCommits`, and no heatmap.
+2. After Accept (or after the graph is half visible, when Always show is on), the service worker sends `OwnerRepos`, then `BranchCommits` requests. `variables.author.id` is your node id, and `since` is the grid's first Sunday at local midnight with your offset. No query text contains a branch name; `BranchHistory` passes it as `qualifiedName`. No fork appears. On your own profile it then sends `MergedPrCommits` with `author:<your login> is:pr is:merged merged:>=` the grid's first Sunday. If extra emails are saved, each repository gets a second `BranchCommits` whose `author` is `{ emails }`, and that list appears in no console line.
+3. On someone else's profile, click Accept. The service worker sends only the viewer query. No `OwnerRepos`, `BranchCommits`, or `MergedPrCommits`, and no heatmap.
 4. Push one commit to three branches, then reload and accept again. The day's count goes up by exactly 1.
 5. A repository last pushed before the grid start is never named in a `BranchCommits` request.
 6. In an organization with SAML single sign-on and no active session, the heatmap still appears (never `UNKNOWN` or `RATE_LIMITED`), and the organization's repository names appear nowhere on the page.

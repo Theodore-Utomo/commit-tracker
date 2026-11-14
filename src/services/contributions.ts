@@ -4,23 +4,24 @@ import { gridDays } from '../core/grid';
 import { policyFor } from '../core/privacy';
 import type { Commit, CountOnly } from '../core/types';
 import type { Failure, Response } from '../messaging/protocol';
-import { createRateBudget, type GitHubClient, type GitHubFailure, type RateBudget } from './github/client';
+import { createRateBudget, type CommitAuthor, type GitHubClient, type GitHubFailure, type RateBudget } from './github/client';
 import { mapPool } from './concurrency';
 
 /** Repositories fetched at once. */
 const REPO_CONCURRENCY = 4;
 
 export interface ContributionsDeps {
-  client: Pick<GitHubClient, 'getViewer' | 'listOwnerRepos' | 'getBranchCommits'>;
+  client: Pick<GitHubClient, 'getViewer' | 'listOwnerRepos' | 'getBranchCommits' | 'getMergedPrCommits'>;
   getToken: () => Promise<string | undefined>;
+  getCommitEmails: () => Promise<readonly string[]>;
   now: () => Date;
   timeZone: string;
 }
 
 /**
  * One `GET_CONTRIBUTIONS` request. On the viewer's own profile it fetches every non-fork
- * branch commit in the grid year and returns `Contributions` in owner mode. On anyone
- * else's profile it returns `{ viewerLogin }` and fetches nothing more.
+ * branch commit in the grid year, then merged pull-request commits, and returns `Contributions`
+ * in owner mode. On anyone else's profile it returns `{ viewerLogin }` and fetches nothing more.
  */
 export async function getContributions(login: string, deps: ContributionsDeps): Promise<Response> {
   const { client, now, timeZone } = deps;
@@ -39,7 +40,8 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
   }
 
   const grid = gridDays(localDay(now().toISOString(), timeZone));
-  const since = startOfLocalDayIso(grid[0] as string, timeZone);
+  const gridStart = grid[0] as string;
+  const since = startOfLocalDayIso(gridStart, timeZone);
   const budget = createRateBudget();
 
   const repos = await client.listOwnerRepos(token, since, budget);
@@ -51,35 +53,58 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
     return rateLimited(budget);
   }
 
-  const author = { id: viewer.data.id };
+  const gathered: Commit[] = [];
   let stopped = false;
   let failure: GitHubFailure | undefined;
+  // Copies of the narrowed token and repo list. A nested function does not keep that narrowing.
+  const authToken = token;
+  const repoList = repos.data.items;
 
-  const settled = await mapPool(repos.data.items, REPO_CONCURRENCY, async (repo) => {
-    if (budget.exhausted() || failure !== undefined) {
-      stopped = true; // start no further repository
-      return [];
+  async function collectBranches(author: CommitAuthor): Promise<void> {
+    if (stopped || failure !== undefined || budget.exhausted()) {
+      return;
     }
-    const result = await client.getBranchCommits(token, repo, author, since, budget);
-    if (!result.ok) {
-      failure ??= result;
-      return [];
+    const settled = await mapPool(repoList, REPO_CONCURRENCY, async (repo) => {
+      if (budget.exhausted() || failure !== undefined) {
+        stopped = true; // start no further repository
+        return [];
+      }
+      const result = await client.getBranchCommits(authToken, repo, author, since, budget);
+      if (!result.ok) {
+        failure ??= result;
+        return [];
+      }
+      if (result.data.truncated) {
+        stopped = true;
+      }
+      if (result.data.failure) {
+        failure ??= result.data.failure;
+      }
+      return result.data.items;
+    });
+
+    for (const slot of settled) {
+      if (slot.status === 'fulfilled') {
+        gathered.push(...slot.value);
+      } else {
+        failure ??= { ok: false, error: slot.reason instanceof TypeError ? 'NETWORK' : 'UNKNOWN' };
+      }
     }
-    if (result.data.truncated) {
+    // A pass that finished its last page under the floor never starts another repository,
+    // so record the stop here. The early return above does not: no repositories and a low
+    // budget is a complete empty result.
+    if (budget.exhausted()) {
       stopped = true;
     }
-    if (result.data.failure) {
-      failure ??= result.data.failure;
-    }
-    return result.data.items;
-  });
+  }
 
-  const gathered: Commit[] = [];
-  for (const slot of settled) {
-    if (slot.status === 'fulfilled') {
-      gathered.push(...slot.value);
-    } else {
-      failure ??= { ok: false, error: slot.reason instanceof TypeError ? 'NETWORK' : 'UNKNOWN' };
+  await collectBranches({ id: viewer.data.id });
+
+  let emails: string[] = [];
+  if (!stopped && failure === undefined && !budget.exhausted()) {
+    emails = (await deps.getCommitEmails()).map((email) => email.trim()).filter((email) => email.length > 0);
+    if (emails.length > 0) {
+      await collectBranches({ emails });
     }
   }
 
@@ -91,6 +116,25 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
     // hidden partway through) with nothing kept is an empty partial result, below.
     if (stopped && budget.exhausted()) {
       return rateLimited(budget);
+    }
+  }
+
+  // A branch phase that already stopped, or a budget too low to start, does not search.
+  if (!stopped && failure === undefined && !budget.exhausted()) {
+    const prs = await client.getMergedPrCommits(authToken, viewer.data.login, gridStart, emails, budget);
+    if (!prs.ok) {
+      if (gathered.length === 0) {
+        return toFailure(prs);
+      }
+      failure = prs;
+    } else {
+      gathered.push(...prs.data.items);
+      if (prs.data.truncated) {
+        stopped = true;
+      }
+      if (prs.data.failure) {
+        failure ??= prs.data.failure;
+      }
     }
   }
 
