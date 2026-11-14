@@ -1,5 +1,6 @@
 import { render } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
+import { sendMessage } from '../../messaging/client';
 import { getCommitEmails, hasToken, setCommitEmails, setToken } from '../../services/settings';
 import { getAlwaysShow, setAlwaysShow } from '../../storage/preferences';
 
@@ -9,6 +10,7 @@ function Options() {
   const [alwaysShow, setAlwaysShowChecked] = useState(false);
   const [emails, setEmails] = useState('');
   const [emailStatus, setEmailStatus] = useState('');
+  const [cacheStatus, setCacheStatus] = useState('');
 
   useEffect(() => {
     void hasToken().then(setSaved);
@@ -58,6 +60,11 @@ function Options() {
     setEmailStatus('Emails saved.');
   }
 
+  async function onClearCache(): Promise<void> {
+    const reply = await sendMessage({ type: 'CLEAR_CACHE' });
+    setCacheStatus(reply.ok && 'cleared' in reply.data ? 'Cache cleared.' : 'Could not clear the cache.');
+  }
+
   return (
     <main>
       <h1>Commit Tracker</h1>
@@ -90,6 +97,10 @@ function Options() {
         <button type="submit">Save emails</button>
       </form>
       {emailStatus && <p role="status">{emailStatus}</p>}
+      <button type="button" onClick={() => void onClearCache()}>
+        Clear cache
+      </button>
+      {cacheStatus && <p role="status">{cacheStatus}</p>}
     </main>
   );
 }

@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
+import { localDay } from '../../../src/core/aggregate';
+import { gridDays } from '../../../src/core/grid';
 import type { Commit, Contributions, RepoRef } from '../../../src/core/types';
 import type { Response } from '../../../src/messaging/protocol';
+import { SCHEMA_VERSION, createCacheStore, type CacheEntry, type CacheKey, type CacheStore } from '../../../src/services/cache/store';
 import type { CommitAuthor, GitHubResult, Page, RateBudget } from '../../../src/services/github/client';
 import { getContributions, type ContributionsDeps } from '../../../src/services/contributions';
 
@@ -64,9 +67,27 @@ function fakeClient(options: {
   return client;
 }
 
+function memoryCache(): CacheStore {
+  const entries = new Map<string, CacheEntry>();
+  const id = (key: CacheKey) =>
+    `${key.viewerLogin.toLowerCase()}|${key.profileLogin.toLowerCase()}|${key.mode}|${SCHEMA_VERSION}`;
+  return {
+    get: vi.fn(async (key) => {
+      const entry = entries.get(id(key));
+      return entry !== undefined && entry.schemaVersion === SCHEMA_VERSION ? entry : undefined;
+    }),
+    put: vi.fn(async (key, entry) => {
+      entries.set(id(key), entry);
+    }),
+    clear: vi.fn(async () => {
+      entries.clear();
+    }),
+  };
+}
+
 function deps(
   client: ContributionsDeps['client'],
-  options?: { token?: string | undefined; emails?: readonly string[] },
+  options?: { token?: string | undefined; emails?: readonly string[]; cache?: CacheStore; now?: () => Date },
 ): ContributionsDeps {
   // A missing argument uses a token. Passing `token: undefined` is the no-token case.
   const token = options !== undefined && 'token' in options ? options.token : 'token';
@@ -74,8 +95,9 @@ function deps(
     client,
     getToken: async () => token,
     getCommitEmails: vi.fn(async () => options?.emails ?? []),
-    now: () => NOW,
+    now: options?.now ?? (() => NOW),
     timeZone: NEW_YORK,
+    cache: options?.cache ?? memoryCache(),
   };
 }
 
@@ -611,5 +633,167 @@ describe('getContributions: merged pull requests and extra emails', () => {
     expect(data.partial).toBe(true);
     expect(data.totals.commits).toBe(1);
     expect(client.getMergedPrCommits).not.toHaveBeenCalled();
+  });
+});
+
+const OVERLAP = '2023-12-28T17:00:00.000Z'; // NOW minus 14 days
+
+describe('getContributions: cache', () => {
+  it('misses, then stores lastSync as the clock time from before the first GitHub call', async () => {
+    const a = repo('a');
+    const cache = memoryCache();
+    const marks: string[] = [];
+    const client = fakeClient({
+      repos: [a],
+      branches: { a: { result: page([commit('s1', a)]) } },
+    });
+    client.getViewer.mockImplementation(async () => {
+      marks.push('viewer');
+      return { ok: true, data: VIEWER };
+    });
+    const data = contributions(
+      await getContributions(
+        'monalisa',
+        deps(client, {
+          cache,
+          now: () => {
+            marks.push('now');
+            return NOW;
+          },
+        }),
+      ),
+    );
+    expect(marks[0]).toBe('now');
+    expect(marks).toContain('viewer');
+    expect(cache.get).toHaveBeenCalledTimes(1);
+    expect(cache.put).toHaveBeenCalledTimes(1);
+    expect(cache.put).toHaveBeenCalledWith(
+      { viewerLogin: 'monalisa', profileLogin: 'monalisa', mode: 'owner' },
+      expect.objectContaining({
+        lastSync: NOW.toISOString(),
+        schemaVersion: 1,
+        contributions: data,
+      }),
+    );
+    expect(NOW.toISOString()).not.toBe('2024-01-10T15:00:00Z');
+    expect(client.listOwnerRepos).toHaveBeenCalledWith('token', SINCE, expect.anything());
+  });
+
+  it('on a hit, refetches from lastSync minus 14 days and counts a repeated SHA once', async () => {
+    const a = repo('a');
+    const cache = memoryCache();
+    const client = fakeClient({
+      repos: [a],
+      branches: { a: { result: page([commit('s1', a)]) } },
+    });
+    const dependencies = deps(client, { cache });
+    await getContributions('monalisa', dependencies);
+    const again = contributions(await getContributions('monalisa', dependencies));
+
+    expect(again.totals.commits).toBe(1);
+    expect(client.listOwnerRepos).toHaveBeenLastCalledWith('token', OVERLAP, expect.anything());
+    expect(client.getBranchCommits).toHaveBeenLastCalledWith('token', a, { id: 'U_viewer' }, OVERLAP, expect.anything());
+    expect(client.getMergedPrCommits).toHaveBeenLastCalledWith('token', 'monalisa', '2023-12-28', [], expect.anything());
+  });
+
+  it('counts a commit first returned on the second call with an authoredDate before the first lastSync', async () => {
+    const a = repo('a');
+    const late = commit('late', a, { authoredDate: '2024-01-05T15:00:00Z' });
+    const client = fakeClient({ repos: [a] });
+    let call = 0;
+    client.getBranchCommits.mockImplementation(async () => {
+      call += 1;
+      return page(call === 1 ? [commit('s1', a)] : [commit('s1', a), late]);
+    });
+    const dependencies = deps(client, { cache: memoryCache() });
+    await getContributions('monalisa', dependencies);
+    const again = contributions(await getContributions('monalisa', dependencies));
+    expect(again.totals.commits).toBe(2);
+    expect(again.days['2024-01-05']?.commits).toEqual([late]);
+  });
+
+  it('uses the grid start when lastSync minus 14 days is earlier than the grid', async () => {
+    const a = repo('a');
+    const cache = memoryCache();
+    await cache.put(
+      { viewerLogin: 'monalisa', profileLogin: 'monalisa', mode: 'owner' },
+      {
+        schemaVersion: 1,
+        lastSync: '2023-01-10T17:00:00.000Z',
+        contributions: {
+          login: 'monalisa',
+          mode: 'owner',
+          days: {},
+          totals: { commits: 0, repos: 0 },
+          partial: false,
+          fetchedAt: '2023-01-10T17:00:00.000Z',
+        },
+      },
+    );
+    const client = fakeClient({ repos: [a] });
+    await getContributions('monalisa', deps(client, { cache }));
+    expect(client.listOwnerRepos).toHaveBeenCalledWith('token', SINCE, expect.anything());
+    expect(client.getBranchCommits).toHaveBeenCalledWith('token', a, { id: 'U_viewer' }, SINCE, expect.anything());
+    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', '2023-01-08', [], expect.anything());
+  });
+
+  it('drops a stored commit whose day has rolled out of the grid', async () => {
+    const a = repo('a');
+    const early = commit('early', a, { authoredDate: '2023-01-10T15:00:00Z' });
+    const kept = commit('kept', a);
+    const client = fakeClient({ repos: [a] });
+    let call = 0;
+    client.getBranchCommits.mockImplementation(async () => {
+      call += 1;
+      return page(call === 1 ? [early, kept] : []);
+    });
+    let now = NOW;
+    const dependencies = deps(client, { cache: memoryCache(), now: () => now });
+    const first = contributions(await getContributions('monalisa', dependencies));
+    expect(first.days['2023-01-10']?.count).toBe(1);
+
+    now = new Date('2024-01-18T17:00:00Z');
+    const newStart = gridDays(localDay(now.toISOString(), NEW_YORK))[0] as string;
+    expect(localDay(early.authoredDate, NEW_YORK) < newStart).toBe(true);
+    const again = contributions(await getContributions('monalisa', dependencies));
+    expect(again.days['2023-01-10']).toBeUndefined();
+    expect(again.days['2024-01-10']?.commits).toEqual([kept]);
+    expect(again.totals).toEqual({ commits: 1, repos: 1 });
+  });
+
+  it('does not write a partial result', async () => {
+    const a = repo('a');
+    const cache = memoryCache();
+    const client = fakeClient({
+      repos: [a],
+      branches: { a: { result: page([commit('k1', a)], true) } },
+    });
+    const data = contributions(await getContributions('monalisa', deps(client, { cache })));
+    expect(data.partial).toBe(true);
+    expect(cache.put).not.toHaveBeenCalled();
+  });
+
+  it('treats a stored schemaVersion other than 1 as a miss and fetches from the grid start', async () => {
+    const cache = createCacheStore();
+    await cache.clear();
+    await cache.put(
+      { viewerLogin: 'monalisa', profileLogin: 'monalisa', mode: 'owner' },
+      {
+        schemaVersion: 0,
+        lastSync: NOW.toISOString(),
+        contributions: {
+          login: 'monalisa',
+          mode: 'owner',
+          days: {},
+          totals: { commits: 0, repos: 0 },
+          partial: false,
+          fetchedAt: NOW.toISOString(),
+        },
+      },
+    );
+    const client = fakeClient({ repos: [repo('a')] });
+    await getContributions('monalisa', deps(client, { cache }));
+    expect(client.listOwnerRepos).toHaveBeenCalledWith('token', SINCE, expect.anything());
+    expect(client.getBranchCommits).toHaveBeenCalledWith('token', repo('a'), { id: 'U_viewer' }, SINCE, expect.anything());
   });
 });

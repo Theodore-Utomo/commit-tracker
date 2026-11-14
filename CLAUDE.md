@@ -322,10 +322,10 @@ resolve mode → list repos → fetch (branches + PRs) → normalize → dedupe 
 Keep each step a named function in its own module, so the order is readable in `contributions.ts`.
 
 **Cache-aside with incremental sync.**
-`contributions.ts` reads the cache first. On a hit, it fetches only commits newer than `lastSync` (`since` on GraphQL `history`), merges them by SHA, and writes the cache back. The cache key is `{ viewerLogin, profileLogin, mode }`. Entries older than 24 hours trigger a refresh from `since = lastSync`; a full refetch happens only on "clear cache" or a schema version change.
+`contributions.ts` reads the cache first. On every hit it refetches from `max(gridStart, lastSync − 14 days)` and merges by SHA. There is no freshness window that skips GitHub. `lastSync` is the time the fetch started, captured before its first GraphQL call, not a commit date. Git's `since` filter compares commit dates, so the overlap catches a commit pushed after a newer one was cached. A commit pushed more than 14 days after its commit date is found only after Clear cache. The cache key is `{ viewerLogin, profileLogin, mode, schemaVersion: 1 }`, with both logins lowercased. A full refetch from the grid start happens on a miss, a schema version other than `1`, or Clear cache. A `partial: true` result is not written.
 
 **Request coalescing.**
-If two tabs ask for the same profile at once, share one in-flight promise (a `Map<key, Promise>` in the worker) instead of fetching twice.
+If two requests ask for the same viewer, profile, and mode at once, they share one in-flight promise. A token change or Clear cache drops that map and bumps a generation counter, and a write from a request that started under the previous generation does not land.
 
 **Bounded concurrency.**
 Fetch about 4 repos at a time with a small promise pool in `concurrency.ts`. Read `rateLimit { remaining resetAt }` from GraphQL responses. Below a threshold (e.g. 200 points), stop and return partial results with a flag rather than burning the whole quota.
@@ -379,11 +379,11 @@ interface Contributions {
 2. **Prompt (content script).** Mount the prompt with `createShadowRootUi` (`cssInjectionMode: 'ui'`) next to the graph. On accept, send `{ type: 'GET_CONTRIBUTIONS', login }`. If "always show" is saved in settings, skip the prompt. Show a loading state.
 3. **Privacy check (service worker).** Read the token from settings; if missing, respond `NO_TOKEN`. Query the viewer and the profile user (see queries below). Resolve the `PrivacyMode` and the matching `PrivacyPolicy`.
 4. **Fetch (service worker + cache + API).** Check the cache. List repos for the mode:
-   - `owner`: `viewer.repositories(affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], isFork: false, orderBy: { field: PUSHED_AT, direction: DESC })`, stopping at the first repo pushed before the grid start. `ownerAffiliations` defaults to `[OWNER, COLLABORATOR]`, which would leave out organization-owned repos.
+   - `owner`: `viewer.repositories(affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], isFork: false, orderBy: { field: PUSHED_AT, direction: DESC })`, stopping at the first repo pushed before `since` (the grid start, or `lastSync − 14 days` on a cache hit). `ownerAffiliations` defaults to `[OWNER, COLLABORATOR]`, which would leave out organization-owned repos.
    - others: `user.repositories(privacy: PUBLIC)` plus `repositoriesContributedTo`, plus private ones only if mode is `publicPlusCounts` and the token can see them
 
    Skip forks. For each repo, fetch every branch's history filtered by author, once with `author: { id }` and once with `author: { emails }` for the user's extra emails (owner mode only, since emails come from settings). Then fetch merged-PR commits to recover squash-merged work, keeping only commits authored by this user.
-5. **Combine (service worker).** Normalize to `Commit`, dedupe by SHA (prefer the `branch` source over `pr` when both exist), apply the policy, and group by `authoredDate` in the viewer's local time zone. Save the cache, then respond with `Contributions`.
+5. **Combine (service worker).** Normalize to `Commit`, dedupe by SHA (prefer the `branch` source over `pr` when both exist), apply the policy, and group by `authoredDate` in the viewer's local time zone. On a cache hit, stored commits are merged in first and days outside the current grid year are dropped. Save the cache when the result is complete, then respond with `Contributions`.
 6. **Render (content script).** Build the 53 × 7 grid starting on the Sunday about a year ago (`core/grid.ts`). Compute 5 color levels by quartile, like GitHub. Color with GitHub's CSS variables (e.g. `var(--contribution-default-bgColor-2)`); custom properties pass into the Shadow DOM, so light and dark mode match automatically. Add the toggle against the native graph and the click-a-day detail view (details only for commits the policy didn't strip). Label the graph "All commits across branches".
 
 ---

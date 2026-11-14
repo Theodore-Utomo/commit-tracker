@@ -5,21 +5,29 @@ export type ErrorCode = 'NO_TOKEN' | 'UNAUTHORIZED' | 'RATE_LIMITED' | 'NOT_FOUN
 
 export type GetContributionsRequest = { type: 'GET_CONTRIBUTIONS'; login: string };
 
-/** Every message the content script may send to the worker. */
-export type Request = GetContributionsRequest;
+export type ClearCacheRequest = { type: 'CLEAR_CACHE' };
+
+/** Every message the content script or the options page may send to the worker. */
+export type Request = GetContributionsRequest | ClearCacheRequest;
 
 /** Success data for someone else's profile until the privacy-modes phase removes it. */
 export interface ViewerLogin {
   viewerLogin: string;
 }
 
+/** Success data for `CLEAR_CACHE`. */
+export interface Cleared {
+  cleared: true;
+}
+
 export type Failure = { ok: false; error: ErrorCode; resetAt?: string };
 
 /**
- * Every reply the worker sends. `data` is `Contributions` on the viewer's own profile and
- * `ViewerLogin` on anyone else's. `resetAt` is an ISO timestamp, set only with `RATE_LIMITED`.
+ * Every reply the worker sends. `data` is `Contributions` on the viewer's own profile,
+ * `ViewerLogin` on anyone else's, and `Cleared` after `CLEAR_CACHE`. `resetAt` is an ISO
+ * timestamp, set only with `RATE_LIMITED`.
  */
-export type Response = { ok: true; data: Contributions | ViewerLogin } | Failure;
+export type Response = { ok: true; data: Contributions | ViewerLogin | Cleared } | Failure;
 
 /** Name of the runtime port the content script holds open while a request is in flight. */
 export const KEEPALIVE_PORT = 'keepalive';
@@ -33,5 +41,8 @@ export function isRequest(message: unknown): message is Request {
     return false;
   }
   const candidate = message as { type?: unknown; login?: unknown };
+  if (candidate.type === 'CLEAR_CACHE') {
+    return true;
+  }
   return candidate.type === 'GET_CONTRIBUTIONS' && typeof candidate.login === 'string';
 }

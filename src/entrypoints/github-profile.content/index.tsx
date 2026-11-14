@@ -177,7 +177,7 @@ function setup(ctx: InstanceType<typeof ContentScriptContext>): () => void {
         }
         return;
       }
-      if ('viewerLogin' in response.data) {
+      if ('viewerLogin' in response.data || !('days' in response.data)) {
         view = { kind: 'idle' };
         dropUi();
         return;

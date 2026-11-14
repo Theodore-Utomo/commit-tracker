@@ -1,14 +1,30 @@
-import { aggregateByDay, inGridYear, localDay, startOfLocalDayIso } from '../core/aggregate';
+import { aggregateByDay, inGridYear, isCountOnly, localDay, startOfLocalDayIso } from '../core/aggregate';
 import { dedupeCommits } from '../core/dedupe';
 import { gridDays } from '../core/grid';
 import { policyFor } from '../core/privacy';
-import type { Commit, CountOnly } from '../core/types';
+import type { Commit, Contributions, CountOnly } from '../core/types';
 import type { Failure, Response } from '../messaging/protocol';
-import { createRateBudget, type CommitAuthor, type GitHubClient, type GitHubFailure, type RateBudget } from './github/client';
+import { SCHEMA_VERSION, type CacheStore } from './cache/store';
 import { mapPool } from './concurrency';
+import {
+  createRateBudget,
+  type CommitAuthor,
+  type GitHubClient,
+  type GitHubFailure,
+  type GitHubResult,
+  type RateBudget,
+} from './github/client';
+import type { Viewer } from './github/mappers';
 
 /** Repositories fetched at once. */
 const REPO_CONCURRENCY = 4;
+
+/**
+ * Git's `since` compares commit dates, so a commit pushed after a newer one was cached
+ * would be missed. 14 days of overlap catches that; dedupe drops the repeats.
+ * shortcut: a commit pushed more than 14 days after its authored date is found only after Clear cache.
+ */
+const OVERLAP_MS = 14 * 86_400_000;
 
 export interface ContributionsDeps {
   client: Pick<GitHubClient, 'getViewer' | 'listOwnerRepos' | 'getBranchCommits' | 'getMergedPrCommits'>;
@@ -16,22 +32,31 @@ export interface ContributionsDeps {
   getCommitEmails: () => Promise<readonly string[]>;
   now: () => Date;
   timeZone: string;
+  cache: CacheStore;
+  /** Set when the handler already resolved the viewer, so this function does not fetch it again. */
+  resolvedViewer?: GitHubResult<Viewer>;
+  /** Captured before the first GraphQL call. The grid and `lastSync` both use it. */
+  startedAt?: Date;
+  /** False after Clear cache or a token change: skip the write. */
+  canWrite?: () => boolean;
 }
 
 /**
  * One `GET_CONTRIBUTIONS` request. On the viewer's own profile it fetches every non-fork
  * branch commit in the grid year, then merged pull-request commits, and returns `Contributions`
  * in owner mode. On anyone else's profile it returns `{ viewerLogin }` and fetches nothing more.
+ * A cache hit refetches from `lastSync − 14 days` and merges with the stored year.
  */
 export async function getContributions(login: string, deps: ContributionsDeps): Promise<Response> {
-  const { client, now, timeZone } = deps;
+  const { client, timeZone } = deps;
+  const startedAt = deps.startedAt ?? deps.now();
 
   const token = (await deps.getToken())?.trim();
   if (!token) {
     return { ok: false, error: 'NO_TOKEN' };
   }
 
-  const viewer = await client.getViewer(token);
+  const viewer = deps.resolvedViewer ?? (await client.getViewer(token));
   if (!viewer.ok) {
     return toFailure(viewer);
   }
@@ -39,9 +64,18 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
     return { ok: true, data: { viewerLogin: viewer.data.login } };
   }
 
-  const grid = gridDays(localDay(now().toISOString(), timeZone));
-  const gridStart = grid[0] as string;
-  const since = startOfLocalDayIso(gridStart, timeZone);
+  const policy = policyFor('owner');
+  const grid = gridDays(localDay(startedAt.toISOString(), timeZone));
+  const gridStartDay = grid[0] as string;
+  const gridStartIso = startOfLocalDayIso(gridStartDay, timeZone);
+  const cached = await deps.cache.get({
+    viewerLogin: viewer.data.login,
+    profileLogin: login,
+    mode: policy.mode,
+  });
+  const since = cached === undefined ? gridStartIso : overlapSince(cached.lastSync, gridStartIso);
+  // A miss searches from the local grid day. A hit uses the UTC day of the overlap timestamp.
+  const mergedDay = cached === undefined ? gridStartDay : new Date(since).toISOString().slice(0, 10);
   const budget = createRateBudget();
 
   const repos = await client.listOwnerRepos(token, since, budget);
@@ -121,7 +155,7 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
 
   // A branch phase that already stopped, or a budget too low to start, does not search.
   if (!stopped && failure === undefined && !budget.exhausted()) {
-    const prs = await client.getMergedPrCommits(authToken, viewer.data.login, gridStart, emails, budget);
+    const prs = await client.getMergedPrCommits(authToken, viewer.data.login, mergedDay, emails, budget);
     if (!prs.ok) {
       if (gathered.length === 0) {
         return toFailure(prs);
@@ -138,27 +172,59 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
     }
   }
 
-  const policy = policyFor('owner');
+  const stored = cached === undefined ? { commits: [], counts: [] } : commitsIn(cached.contributions);
   const presented: (Commit | CountOnly)[] = [];
-  for (const commit of dedupeCommits(gathered)) {
+  for (const commit of dedupeCommits([...stored.commits, ...gathered])) {
     const kept = policy.includeRepo(commit.repo) ? policy.present(commit) : undefined;
     if (kept !== undefined) {
       presented.push(kept);
     }
   }
+  const seen = new Set(presented.map((item) => item.sha));
+  for (const count of stored.counts) {
+    if (!seen.has(count.sha)) {
+      presented.push(count);
+    }
+  }
   const { days, totals } = aggregateByDay(inGridYear(presented, grid, timeZone), timeZone);
-
-  return {
-    ok: true,
-    data: {
-      login: viewer.data.login,
-      mode: policy.mode,
-      days,
-      totals,
-      partial: stopped || failure !== undefined,
-      fetchedAt: now().toISOString(),
-    },
+  const data: Contributions = {
+    login: viewer.data.login,
+    mode: policy.mode,
+    days,
+    totals,
+    partial: stopped || failure !== undefined,
+    fetchedAt: startedAt.toISOString(),
   };
+
+  if (!data.partial && deps.canWrite?.() !== false) {
+    await deps.cache.put(
+      { viewerLogin: viewer.data.login, profileLogin: login, mode: policy.mode },
+      { contributions: data, lastSync: startedAt.toISOString(), schemaVersion: SCHEMA_VERSION },
+    );
+  }
+
+  return { ok: true, data };
+}
+
+function overlapSince(lastSync: string, gridStartIso: string): string {
+  const overlapMs = new Date(lastSync).getTime() - OVERLAP_MS;
+  return overlapMs > new Date(gridStartIso).getTime() ? new Date(overlapMs).toISOString() : gridStartIso;
+}
+
+/** Stored days are the source of the next merge. Count-only values have no commit to dedupe. */
+function commitsIn(contributions: Contributions): { commits: Commit[]; counts: CountOnly[] } {
+  const commits: Commit[] = [];
+  const counts: CountOnly[] = [];
+  for (const bucket of Object.values(contributions.days)) {
+    for (const item of bucket.commits ?? []) {
+      if (isCountOnly(item)) {
+        counts.push(item);
+      } else {
+        commits.push(item);
+      }
+    }
+  }
+  return { commits, counts };
 }
 
 function toFailure(failure: GitHubFailure): Failure {

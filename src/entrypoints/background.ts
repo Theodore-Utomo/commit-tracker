@@ -1,17 +1,22 @@
 import { isRequest, KEEPALIVE_PORT } from '../messaging/protocol';
+import { createCacheStore } from '../services/cache/store';
 import type { ContributionsDeps } from '../services/contributions';
 import { createGitHubClient } from '../services/github/client';
-import { handleGetContributions } from '../services/handle-message';
-import { getCommitEmails, getToken } from '../services/settings';
+import { handleClearCache, handleGetContributions, onTokenChanged } from '../services/handle-message';
+import { getCommitEmails, getToken, watchToken } from '../services/settings';
 
 export default defineBackground(() => {
+  const cache = createCacheStore();
   const deps: ContributionsDeps = {
     client: createGitHubClient(),
     getToken,
     getCommitEmails,
     now: () => new Date(),
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    cache,
   };
+
+  watchToken(onTokenChanged);
 
   browser.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
     if (sender.id !== browser.runtime.id || !isRequest(message)) {
@@ -21,6 +26,11 @@ export default defineBackground(() => {
     switch (message.type) {
       case 'GET_CONTRIBUTIONS':
         void handleGetContributions(message, deps)
+          .catch(() => ({ ok: false, error: 'UNKNOWN' }) as const)
+          .then(sendResponse);
+        return true;
+      case 'CLEAR_CACHE':
+        void handleClearCache(cache)
           .catch(() => ({ ok: false, error: 'UNKNOWN' }) as const)
           .then(sendResponse);
         return true;

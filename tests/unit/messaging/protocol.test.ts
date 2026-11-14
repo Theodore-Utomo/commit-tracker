@@ -6,6 +6,10 @@ describe('isRequest', () => {
     expect(isRequest({ type: 'GET_CONTRIBUTIONS', login: 'octocat' })).toBe(true);
   });
 
+  it('accepts CLEAR_CACHE', () => {
+    expect(isRequest({ type: 'CLEAR_CACHE' })).toBe(true);
+  });
+
   it.each([
     ['null', null],
     ['undefined', undefined],

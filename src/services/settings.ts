@@ -22,6 +22,13 @@ export async function hasToken(): Promise<boolean> {
   return (await getToken()) !== undefined;
 }
 
+/** Calls `onChange` when the saved token is replaced or removed. The new value is not passed on. */
+export function watchToken(onChange: () => void): void {
+  tokenItem.watch(() => {
+    onChange();
+  });
+}
+
 /** Extra commit emails. Used only as a GraphQL author filter, and only in owner mode. */
 const emailsItem = storage.defineItem<string[]>('local:commitEmails', { fallback: [] });
 
