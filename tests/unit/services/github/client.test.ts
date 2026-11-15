@@ -398,6 +398,26 @@ describe('GitHubClient.listPublicRepos', () => {
     expect(result.ok && result.data.truncated).toBe(false);
   });
 
+  it('keeps paging contributed repositories after the owned list hits since', async () => {
+    const { calls, client } = scripted([
+      publicReposPage(
+        [repoNode('owned', '2024-01-10T00:00:00Z'), repoNode('old', '2020-01-01T00:00:00Z')],
+        [repoNode('contrib', '2024-01-09T00:00:00Z')],
+        { owned: 'o2', contributed: 'c2' },
+      ),
+      publicReposPage([], [repoNode('contrib-2', '2024-01-08T00:00:00Z')]),
+    ]);
+    const result = await client.listPublicRepos(TOKEN, 'octocat', SINCE, createRateBudget());
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.variables).toMatchObject({
+      includeOwned: false,
+      includeContributed: true,
+      contributedCursor: 'c2',
+    });
+    expect(result.ok && result.data.items.map((item) => item.name)).toEqual(['owned', 'contrib', 'contrib-2']);
+    expect(result.ok && result.data.truncated).toBe(false);
+  });
+
   it('stops each connection at the first repository pushed before since', async () => {
     const { calls, client } = scripted([
       publicReposPage(
