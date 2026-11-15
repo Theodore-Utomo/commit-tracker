@@ -3,15 +3,25 @@ import type { Commit, RepoRef } from '../../core/types';
 import {
   mapBranchCommits,
   mapBranchHistory,
+  mapContributedRepos,
   mapMergedPrSearch,
   mapPrCommitPage,
+  mapPublicRepos,
   mapRateLimit,
   mapRepos,
-  mapViewer,
+  mapViewerAndUser,
   type RateLimit,
-  type Viewer,
+  type ViewerAndUser,
 } from './mappers';
-import { BRANCH_COMMITS, BRANCH_HISTORY, MERGED_PR_COMMITS, OWNER_REPOS, PR_COMMITS, VIEWER_QUERY } from './queries';
+import {
+  BRANCH_COMMITS,
+  BRANCH_HISTORY,
+  MERGED_PR_COMMITS,
+  OWNER_REPOS,
+  PR_COMMITS,
+  PUBLIC_REPOS,
+  VIEWER_AND_USER,
+} from './queries';
 
 const GRAPHQL_URL = 'https://api.github.com/graphql';
 
@@ -27,7 +37,7 @@ export interface GraphQLError {
 /** A GitHub failure the client can name. `resetAt` is set only with `RATE_LIMITED`. */
 export type GitHubFailure = {
   ok: false;
-  error: 'UNAUTHORIZED' | 'RATE_LIMITED' | 'NETWORK' | 'UNKNOWN';
+  error: 'UNAUTHORIZED' | 'RATE_LIMITED' | 'NOT_FOUND' | 'NETWORK' | 'UNKNOWN';
   resetAt?: string;
 };
 
@@ -97,9 +107,15 @@ export function createRateBudget(): RateBudget {
 export type CommitAuthor = { id: string } | { emails: readonly string[] };
 
 export interface GitHubClient {
-  getViewer(token: string): Promise<GitHubResult<Viewer>>;
+  /** The token's account and `login`'s user. `user: null` is `NOT_FOUND`. */
+  getViewerAndUser(token: string, login: string): Promise<GitHubResult<ViewerAndUser>>;
   /** The viewer's non-fork repositories pushed at or after `since`, newest-pushed first. */
   listOwnerRepos(token: string, since: string, budget: RateBudget): Promise<GitHubResult<Page<RepoRef>>>;
+  /**
+   * Public non-fork repositories `login` owns or contributed to, pushed at or after `since`.
+   * A login that fails `LOGIN_PATTERN` yields no items and makes no request.
+   */
+  listPublicRepos(token: string, login: string, since: string, budget: RateBudget): Promise<GitHubResult<Page<RepoRef>>>;
   /**
    * Every branch commit in `repo` by `author` since `since`. A repository that is `null` or
    * forbidden to this token yields no items and no failure.
@@ -114,8 +130,9 @@ export interface GitHubClient {
   /**
    * Commits on pull requests merged on or after `mergedSince` (`YYYY-MM-DD`) whose author is
    * `login`. A login that fails `LOGIN_PATTERN` yields no items and makes no request.
-   * `savedEmails` keep commits that have no linked user. GitHub search stops at 1,000 hits;
-   * a larger `issueCount` comes back `truncated`.
+   * `savedEmails` keep commits that have no linked user. `prSearchQualifiers` is inserted after
+   * `is:merged` (`''` or `' is:public'`). GitHub search stops at 1,000 hits; a larger
+   * `issueCount` comes back `truncated`.
    */
   getMergedPrCommits(
     token: string,
@@ -123,6 +140,7 @@ export interface GitHubClient {
     mergedSince: string,
     savedEmails: readonly string[],
     budget: RateBudget,
+    prSearchQualifiers?: string,
   ): Promise<GitHubResult<Page<Commit>>>;
 }
 
@@ -188,14 +206,18 @@ export function createGitHubClient(options: ClientOptions = {}): GitHubClient {
   }
 
   return {
-    async getViewer(token) {
-      const result = await graphql(token, VIEWER_QUERY);
+    async getViewerAndUser(token, login) {
+      const result = await graphql(token, VIEWER_AND_USER, { login });
       if (!result.ok) {
         return result;
       }
       try {
-        const viewer = mapViewer(result.data);
-        return result.errors ? { ok: true, data: viewer, errors: result.errors } : { ok: true, data: viewer };
+        const mapped = mapViewerAndUser(result.data);
+        if (mapped.status === 'not-found') {
+          return { ok: false, error: 'NOT_FOUND' };
+        }
+        const account = mapped.account;
+        return result.errors ? { ok: true, data: account, errors: result.errors } : { ok: true, data: account };
       } catch {
         return { ok: false, error: 'UNKNOWN' };
       }
@@ -231,6 +253,75 @@ export function createGitHubClient(options: ClientOptions = {}): GitHubClient {
           return { ok: true, data: { items: repos, truncated: true } };
         }
         cursor = page.nextCursor;
+      }
+    },
+
+    async listPublicRepos(token, login, since, budget) {
+      if (!LOGIN_PATTERN.test(login)) {
+        return { ok: true, data: { items: [], truncated: false } };
+      }
+      const sinceMs = Date.parse(since);
+      const repos: RepoRef[] = [];
+      const seen = new Set<string>();
+      let ownedCursor: string | null = null;
+      let contributedCursor: string | null = null;
+      let includeOwned = true;
+      let includeContributed = true;
+
+      // shortcut: forks are already dropped, so a fork sitting on `since` can cost one extra page.
+      const take = (page: ReturnType<typeof mapPublicRepos>): 'next' | 'done' => {
+        for (const { repo, pushedAt } of page.repos) {
+          if (pushedAt === null) {
+            continue;
+          }
+          if (Date.parse(pushedAt) < sinceMs) {
+            return 'done';
+          }
+          const key = `${repo.owner.toLowerCase()}/${repo.name.toLowerCase()}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            repos.push(repo);
+          }
+        }
+        return page.nextCursor === null ? 'done' : 'next';
+      };
+
+      for (;;) {
+        const result = await graphql(token, PUBLIC_REPOS, {
+          login,
+          ownedCursor,
+          contributedCursor,
+          includeOwned,
+          includeContributed,
+        });
+        if (!result.ok) {
+          return result;
+        }
+        budget.record(mapRateLimit(result.data));
+
+        if (includeOwned) {
+          const page = mapPublicRepos(result.data);
+          if (take(page) === 'next') {
+            ownedCursor = page.nextCursor;
+          } else {
+            includeOwned = false;
+          }
+        }
+        if (includeContributed) {
+          const page = mapContributedRepos(result.data);
+          if (take(page) === 'next') {
+            contributedCursor = page.nextCursor;
+          } else {
+            includeContributed = false;
+          }
+        }
+
+        if (!includeOwned && !includeContributed) {
+          return { ok: true, data: { items: repos, truncated: false } };
+        }
+        if (budget.exhausted()) {
+          return { ok: true, data: { items: repos, truncated: true } };
+        }
       }
     },
 
@@ -296,12 +387,13 @@ export function createGitHubClient(options: ClientOptions = {}): GitHubClient {
       }
     },
 
-    async getMergedPrCommits(token, login, mergedSince, savedEmails, budget) {
+    async getMergedPrCommits(token, login, mergedSince, savedEmails, budget, prSearchQualifiers = '') {
       if (!LOGIN_PATTERN.test(login)) {
         return { ok: true, data: { items: [], truncated: false } };
       }
       // The pattern excludes spaces and search operators, so the login cannot change the query.
-      const q = `author:${login} is:pr is:merged merged:>=${mergedSince}`;
+      // prSearchQualifiers is a policy constant (`''` or `' is:public'`), not page text.
+      const q = `author:${login} is:pr is:merged${prSearchQualifiers} merged:>=${mergedSince}`;
       const commits: Commit[] = [];
       const cut = (failure?: GitHubFailure): GitHubResult<Page<Commit>> => ({
         ok: true,

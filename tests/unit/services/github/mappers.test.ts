@@ -4,10 +4,12 @@ import type { RepoRef } from '../../../../src/core/types';
 import {
   mapBranchCommits,
   mapBranchHistory,
+  mapContributedRepos,
   mapMergedPrCommits,
   mapRateLimit,
   mapRepos,
   mapViewer,
+  mapViewerAndUser,
 } from '../../../../src/services/github/mappers';
 
 const repo: RepoRef = { owner: 'acme', name: 'widgets', isPrivate: false, isFork: false };
@@ -32,6 +34,34 @@ describe('mapViewer', () => {
   it('rejects a viewer missing its login or id', () => {
     expect(() => mapViewer({ viewer: { login: 'octocat' } })).toThrow();
     expect(() => mapViewer({ viewer: { id: 'x', login: 7 } })).toThrow();
+  });
+});
+
+describe('mapViewerAndUser', () => {
+  const viewer = { login: 'octocat', id: 'U_1' };
+
+  it('maps the viewer, the profile user, and the restricted count', () => {
+    expect(
+      mapViewerAndUser({
+        viewer,
+        user: { id: 'U_2', login: 'hubot', contributionsCollection: { restrictedContributionsCount: 4 } },
+      }),
+    ).toEqual({
+      status: 'ok',
+      account: {
+        viewer,
+        user: { login: 'hubot', id: 'U_2' },
+        restrictedContributionsCount: 4,
+      },
+    });
+  });
+
+  it('maps user: null to a not-found result', () => {
+    expect(mapViewerAndUser({ viewer, user: null })).toEqual({ status: 'not-found' });
+  });
+
+  it('rejects a user object that omits the restricted count', () => {
+    expect(() => mapViewerAndUser({ viewer, user: { id: 'U_2', login: 'hubot' } })).toThrow();
   });
 });
 
@@ -85,6 +115,33 @@ describe('mapRepos', () => {
     expect(mapRepos(page([], true)).nextCursor).toBe('next');
     expect(mapRepos(page([], false)).nextCursor).toBeNull();
     expect(mapRepos({ viewer: { repositories: null } })).toEqual({ repos: [], nextCursor: null });
+  });
+});
+
+describe('mapContributedRepos', () => {
+  const page = (nodes: unknown[]) => ({
+    user: {
+      repositoriesContributedTo: { pageInfo: { hasNextPage: false, endCursor: null }, nodes },
+    },
+  });
+  const node = (overrides: Record<string, unknown> = {}) => ({
+    name: 'widgets',
+    owner: { login: 'acme' },
+    isPrivate: false,
+    isFork: false,
+    pushedAt: '2024-01-10T00:00:00Z',
+    ...overrides,
+  });
+
+  it('maps a contributed-to node to a RepoRef', () => {
+    expect(mapContributedRepos(page([node()]))).toEqual({
+      repos: [{ repo: { owner: 'acme', name: 'widgets', isPrivate: false, isFork: false }, pushedAt: '2024-01-10T00:00:00Z' }],
+      nextCursor: null,
+    });
+  });
+
+  it('drops a fork', () => {
+    expect(mapContributedRepos(page([node({ isFork: true })])).repos).toEqual([]);
   });
 });
 

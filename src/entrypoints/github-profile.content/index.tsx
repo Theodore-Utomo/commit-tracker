@@ -178,8 +178,10 @@ function setup(ctx: InstanceType<typeof ContentScriptContext>): () => void {
         return;
       }
       if (!('days' in response.data)) {
-        view = { kind: 'idle' };
-        dropUi();
+        view = { kind: 'prompt', loading: false, error: 'UNKNOWN' };
+        if (await ensureUi()) {
+          paint();
+        }
         return;
       }
       view = { kind: 'heatmap', contributions: response.data, today };

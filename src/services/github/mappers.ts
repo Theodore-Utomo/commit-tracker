@@ -44,7 +44,7 @@ function nextCursorOf(connection: Json | undefined): string | null {
   return pageInfo?.hasNextPage === true && typeof pageInfo.endCursor === 'string' ? pageInfo.endCursor : null;
 }
 
-/** Maps the `data` of a `VIEWER_QUERY` response. Throws when `viewer` is missing or malformed. */
+/** Maps the `data` of a viewer selection. Throws when `viewer` is missing or malformed. */
 export function mapViewer(data: unknown): Viewer {
   const viewer = asObject(asObject(data)?.viewer);
   if (viewer === undefined) {
@@ -57,6 +57,43 @@ export function mapViewer(data: unknown): Viewer {
   return { login, id };
 }
 
+/** The token's account and the profile the request asked for. */
+export interface ViewerAndUser {
+  viewer: Viewer;
+  user: Viewer;
+  /** Requested so the query matches the API. Mode selection does not read it. */
+  restrictedContributionsCount: number;
+}
+
+export type ViewerAndUserMapped = { status: 'ok'; account: ViewerAndUser } | { status: 'not-found' };
+
+/**
+ * Maps a `VIEWER_AND_USER` payload. `user: null` is not-found. A missing or malformed
+ * viewer, or a user object without its id, login, and restricted count, throws.
+ */
+export function mapViewerAndUser(data: unknown): ViewerAndUserMapped {
+  const root = asObject(data);
+  if (root === undefined) {
+    throw new Error('GraphQL response has no viewer.');
+  }
+  const viewer = mapViewer({ viewer: root.viewer });
+  if (!('user' in root)) {
+    throw new Error('GraphQL response has no user.');
+  }
+  if (root.user === null) {
+    return { status: 'not-found' };
+  }
+  const user = asObject(root.user);
+  const restricted = asObject(user?.contributionsCollection)?.restrictedContributionsCount;
+  if (user === undefined || typeof user.login !== 'string' || typeof user.id !== 'string' || typeof restricted !== 'number') {
+    throw new Error('GraphQL user is missing login, id, or restrictedContributionsCount.');
+  }
+  return {
+    status: 'ok',
+    account: { viewer, user: { login: user.login, id: user.id }, restrictedContributionsCount: restricted },
+  };
+}
+
 /** The `rateLimit` block of a response's `data`, or `undefined` when absent or malformed. */
 export function mapRateLimit(data: unknown): RateLimit | undefined {
   const rateLimit = asObject(asObject(data)?.rateLimit);
@@ -66,11 +103,10 @@ export function mapRateLimit(data: unknown): RateLimit | undefined {
 }
 
 /**
- * Maps one `OWNER_REPOS` page. Forks and `null` nodes (for example, an organization behind
+ * Maps one repository connection. Forks and `null` nodes (for example, an organization behind
  * SAML single sign-on) are dropped. `pushedAt` is kept so the caller can stop at the grid start.
  */
-export function mapRepos(data: unknown): RepoListPage {
-  const connection = asObject(asObject(asObject(data)?.viewer)?.repositories);
+function mapRepoConnection(connection: Json | undefined): RepoListPage {
   const repos: RepoListPage['repos'] = [];
   for (const raw of asArray(connection?.nodes)) {
     const node = asObject(raw);
@@ -89,6 +125,21 @@ export function mapRepos(data: unknown): RepoListPage {
     repos.push({ repo: { owner, name: node.name, isPrivate: node.isPrivate, isFork: false }, pushedAt });
   }
   return { repos, nextCursor: nextCursorOf(connection) };
+}
+
+/** Maps one `OWNER_REPOS` page. */
+export function mapRepos(data: unknown): RepoListPage {
+  return mapRepoConnection(asObject(asObject(asObject(data)?.viewer)?.repositories));
+}
+
+/** Maps `user.repositories` from one `PUBLIC_REPOS` page. */
+export function mapPublicRepos(data: unknown): RepoListPage {
+  return mapRepoConnection(asObject(asObject(asObject(data)?.user)?.repositories));
+}
+
+/** Maps `user.repositoriesContributedTo` from one `PUBLIC_REPOS` page. */
+export function mapContributedRepos(data: unknown): RepoListPage {
+  return mapRepoConnection(asObject(asObject(asObject(data)?.user)?.repositoriesContributedTo));
 }
 
 function mapHistoryNodes(history: Json | undefined, repo: RepoRef, branch: string): Commit[] {

@@ -264,11 +264,11 @@ The page (GitHub's DOM) is untrusted territory: other extensions and page script
 // return Page<T> = { items, truncated, failure? } and record each reply's rateLimit in a
 // RateBudget shared across the request; they stop paging once it reports fewer than 200 points.
 interface GitHubClient {
-  getViewer(token: string): Promise<GitHubResult<Viewer>>;
+  getViewerAndUser(token: string, login: string): Promise<GitHubResult<ViewerAndUser>>;
   listOwnerRepos(token: string, since: string, budget: RateBudget): Promise<GitHubResult<Page<RepoRef>>>;
+  listPublicRepos(token: string, login: string, since: string, budget: RateBudget): Promise<GitHubResult<Page<RepoRef>>>;
   getBranchCommits(token: string, repo: RepoRef, author: { id: string } | { emails: readonly string[] }, since: string, budget: RateBudget): Promise<GitHubResult<Page<Commit>>>;
-  getMergedPrCommits(token: string, login: string, mergedSince: string, savedEmails: readonly string[], budget: RateBudget): Promise<GitHubResult<Page<Commit>>>;
-  // Later phases: getViewerAndUser replacing getViewer, and listPublicRepos (privacy modes).
+  getMergedPrCommits(token: string, login: string, mergedSince: string, savedEmails: readonly string[], budget: RateBudget, prSearchQualifiers?: string): Promise<GitHubResult<Page<Commit>>>;
 }
 
 interface CacheStore {
@@ -289,7 +289,7 @@ type Request =
   | { type: 'CLEAR_CACHE' };
 
 type Response =
-  | { ok: true; data: Contributions }   // until the privacy-modes phase: Contributions | { viewerLogin } for other profiles
+  | { ok: true; data: Contributions | { cleared: true } }
   | { ok: false; error: ErrorCode; resetAt?: string }; // resetAt: ISO, only with RATE_LIMITED
 
 type ErrorCode = 'NO_TOKEN' | 'UNAUTHORIZED' | 'RATE_LIMITED' | 'NOT_FOUND' | 'NETWORK' | 'UNKNOWN';
@@ -303,10 +303,16 @@ Each privacy mode is a policy object with the same interface:
 ```ts
 interface PrivacyPolicy {
   mode: PrivacyMode; // 'owner' | 'publicPlusCounts' | 'publicOnly'
+  repoSource: 'viewerAffiliated' | 'userPublic';
+  authorId(ids: { viewerId: string; userId: string }): string;
+  useSavedEmails: boolean;
+  prSearchQualifiers: string; // '' or ' is:public'
   includeRepo(repo: RepoRef): boolean;
   present(commit: Commit): Commit | CountOnly | undefined; // strips details when needed
 }
 ```
+
+`resolveMode(viewerLogin, profileLogin)` returns `owner` or `publicOnly`. It compares logins with `toLowerCase()` and does not read `restrictedContributionsCount`. `publicPlusCounts` stays unselected. The pipeline reads `repoSource`, `authorId`, `useSavedEmails`, and `prSearchQualifiers` instead of branching on the mode name.
 
 `present` returns a new object built field by field (unknown fields are dropped), a `CountOnly` for a private commit the mode may only count, or `undefined` when the commit must be dropped (forks in every mode, private repos in `publicOnly`). Callers drop `undefined` before aggregating.
 

@@ -1,5 +1,16 @@
-/** The login and node id of the account that owns the token. */
-export const VIEWER_QUERY = 'query Viewer { viewer { login id } }';
+/**
+ * The token's account and the profile user. `restrictedContributionsCount` is selected
+ * and then ignored: other profiles stay `publicOnly` until that signal is confirmed.
+ */
+export const VIEWER_AND_USER = `query ViewerAndUser($login: String!) {
+  viewer { login id }
+  user(login: $login) {
+    id
+    login
+    contributionsCollection { restrictedContributionsCount }
+  }
+  rateLimit { remaining resetAt }
+}`;
 
 /**
  * One page of the viewer's repositories, newest-pushed first, forks excluded.
@@ -16,6 +27,35 @@ export const OWNER_REPOS = `query OwnerRepos($cursor: String) {
       isFork: false
       orderBy: { field: PUSHED_AT, direction: DESC }
     ) {
+      pageInfo { hasNextPage endCursor }
+      nodes { name owner { login } isPrivate isFork pushedAt }
+    }
+  }
+  rateLimit { remaining resetAt }
+}`;
+
+/**
+ * One page of a user's public repositories and of the public repositories they contributed to.
+ * Each connection is skipped with `@include` once it has been paged to the end or past `since`.
+ */
+export const PUBLIC_REPOS = `query PublicRepos($login: String!, $ownedCursor: String, $contributedCursor: String, $includeOwned: Boolean!, $includeContributed: Boolean!) {
+  user(login: $login) {
+    repositories(
+      privacy: PUBLIC
+      isFork: false
+      first: 50
+      after: $ownedCursor
+      orderBy: { field: PUSHED_AT, direction: DESC }
+    ) @include(if: $includeOwned) {
+      pageInfo { hasNextPage endCursor }
+      nodes { name owner { login } isPrivate isFork pushedAt }
+    }
+    repositoriesContributedTo(
+      privacy: PUBLIC
+      first: 50
+      after: $contributedCursor
+      orderBy: { field: PUSHED_AT, direction: DESC }
+    ) @include(if: $includeContributed) {
       pageInfo { hasNextPage endCursor }
       nodes { name owner { login } isPrivate isFork pushedAt }
     }

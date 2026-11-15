@@ -3,14 +3,20 @@ import type { GetContributionsRequest } from '../../../src/messaging/protocol';
 import type { CacheEntry, CacheStore } from '../../../src/services/cache/store';
 import type { ContributionsDeps, getContributions } from '../../../src/services/contributions';
 import type { GitHubClient } from '../../../src/services/github/client';
+import type { Viewer } from '../../../src/services/github/mappers';
 import { handleClearCache, handleGetContributions, onTokenChanged } from '../../../src/services/handle-message';
 
 const request: GetContributionsRequest = { type: 'GET_CONTRIBUTIONS', login: 'octocat' };
 
-function fakeClient(getViewer: GitHubClient['getViewer']) {
+function account(viewer: Viewer, user: Viewer = viewer, restrictedContributionsCount = 0) {
+  return { ok: true as const, data: { viewer, user, restrictedContributionsCount } };
+}
+
+function fakeClient(getViewerAndUser: GitHubClient['getViewerAndUser']) {
   return {
-    getViewer: vi.fn(getViewer),
+    getViewerAndUser: vi.fn(getViewerAndUser),
     listOwnerRepos: vi.fn<GitHubClient['listOwnerRepos']>(async () => ({ ok: true, data: { items: [], truncated: false } })),
+    listPublicRepos: vi.fn<GitHubClient['listPublicRepos']>(async () => ({ ok: true, data: { items: [], truncated: false } })),
     getBranchCommits: vi.fn<GitHubClient['getBranchCommits']>(async () => ({ ok: true, data: { items: [], truncated: false } })),
     getMergedPrCommits: vi.fn<GitHubClient['getMergedPrCommits']>(async () => ({
       ok: true,
@@ -40,7 +46,10 @@ function withDeps(partial: Pick<ContributionsDeps, 'getToken' | 'client'> & { ca
   };
 }
 
-const viewerClient = () => fakeClient(async () => ({ ok: true, data: { login: 'monalisa', id: 'U_1' } }));
+const viewerClient = () =>
+  fakeClient(async (_token, login) =>
+    account({ login: 'monalisa', id: 'U_1' }, { login, id: login.toLowerCase() === 'monalisa' ? 'U_1' : 'U_profile' }),
+  );
 
 beforeEach(() => {
   onTokenChanged();
@@ -54,7 +63,7 @@ describe('handleGetContributions', () => {
         ok: false,
         error: 'NO_TOKEN',
       });
-      expect(client.getViewer).not.toHaveBeenCalled();
+      expect(client.getViewerAndUser).not.toHaveBeenCalled();
     }
   });
 
@@ -64,17 +73,29 @@ describe('handleGetContributions', () => {
     await expect(
       handleGetContributions({ type: 'GET_CONTRIBUTIONS', login: 'octo%20cat' }, withDeps({ getToken, client })),
     ).resolves.toEqual({ ok: false, error: 'NOT_FOUND' });
-    expect(client.getViewer).not.toHaveBeenCalled();
+    expect(client.getViewerAndUser).not.toHaveBeenCalled();
     expect(getToken).not.toHaveBeenCalled();
   });
 
-  it('returns the viewer login and passes the trimmed token to the client', async () => {
+  it('passes the trimmed token and the profile login to the client', async () => {
     const client = viewerClient();
-    await expect(handleGetContributions(request, withDeps({ getToken: async () => ' token ', client }))).resolves.toEqual({
+    await expect(handleGetContributions(request, withDeps({ getToken: async () => ' token ', client }))).resolves.toMatchObject({
       ok: true,
-      data: { viewerLogin: 'monalisa' },
+      data: { login: 'octocat', mode: 'publicOnly' },
     });
-    expect(client.getViewer).toHaveBeenCalledWith('token');
+    expect(client.getViewerAndUser).toHaveBeenCalledWith('token', 'octocat');
+    expect(client.listOwnerRepos).not.toHaveBeenCalled();
+    expect(client.listPublicRepos).toHaveBeenCalled();
+  });
+
+  it('passes NOT_FOUND through when GitHub has no such user and lists no repositories', async () => {
+    const client = fakeClient(async () => ({ ok: false, error: 'NOT_FOUND' }));
+    await expect(handleGetContributions(request, withDeps({ getToken: async () => 'token', client }))).resolves.toEqual({
+      ok: false,
+      error: 'NOT_FOUND',
+    });
+    expect(client.listPublicRepos).not.toHaveBeenCalled();
+    expect(client.listOwnerRepos).not.toHaveBeenCalled();
   });
 
   it('passes UNAUTHORIZED through from the client', async () => {
@@ -103,16 +124,14 @@ describe('handleGetContributions', () => {
     });
   });
 
-  it('sends only the viewer login to the page, even when the client result carries errors', async () => {
-    const client = fakeClient(async () => ({
-      ok: true,
-      data: { login: 'monalisa', id: 'U_1' },
+  it('does not send the client error list to the page', async () => {
+    const client = fakeClient(async (_token, login) => ({
+      ...account({ login: 'monalisa', id: 'U_1' }, { login, id: 'U_profile' }),
       errors: [{ type: 'FORBIDDEN', path: ['viewer', 'organization'] }],
     }));
-    await expect(handleGetContributions(request, withDeps({ getToken: async () => 'token', client }))).resolves.toStrictEqual({
-      ok: true,
-      data: { viewerLogin: 'monalisa' },
-    });
+    const result = await handleGetContributions(request, withDeps({ getToken: async () => 'token', client }));
+    expect(result).toMatchObject({ ok: true, data: { mode: 'publicOnly', login: 'octocat' } });
+    expect(JSON.stringify(result)).not.toContain('FORBIDDEN');
   });
 
   it('never attaches resetAt to a failure other than RATE_LIMITED', async () => {
@@ -154,19 +173,22 @@ describe('handleGetContributions', () => {
   });
 });
 
+const OCTOCAT = { login: 'octocat', id: 'U_octo' };
+
 describe('handleGetContributions and the branch-commits pipeline', () => {
-  const ownClient = () => fakeClient(async () => ({ ok: true, data: { login: 'octocat', id: 'U_octo' } }));
+  const ownClient = () => fakeClient(async () => account(OCTOCAT));
 
   it("returns Contributions for the viewer's own login", async () => {
     const result = await handleGetContributions(request, withDeps({ getToken: async () => 'token', client: ownClient() }));
     expect(result).toMatchObject({ ok: true, data: { login: 'octocat', mode: 'owner', partial: false } });
   });
 
-  it('returns { viewerLogin } for another login and lists no repositories', async () => {
+  it('returns publicOnly Contributions for another login and does not list owner repositories', async () => {
     const client = viewerClient();
     const result = await handleGetContributions(request, withDeps({ getToken: async () => 'token', client }));
-    expect(result).toEqual({ ok: true, data: { viewerLogin: 'monalisa' } });
+    expect(result).toMatchObject({ ok: true, data: { login: 'octocat', mode: 'publicOnly' } });
     expect(client.listOwnerRepos).not.toHaveBeenCalled();
+    expect(client.listPublicRepos).toHaveBeenCalled();
   });
 
   it('forwards the login and the original deps to getContributions and returns its Response', async () => {
@@ -186,7 +208,7 @@ describe('handleGetContributions and the branch-commits pipeline', () => {
     );
     const passed = run.mock.calls[0]?.[1];
     expect(passed?.startedAt).toBe(NOW);
-    expect(passed?.resolvedViewer).toEqual({ ok: true, data: { login: 'octocat', id: 'U_octo' } });
+    expect(passed?.resolvedViewer).toEqual(account(OCTOCAT));
     expect(passed?.canWrite?.()).toBe(true);
   });
 
@@ -213,7 +235,7 @@ describe('handleGetContributions and the branch-commits pipeline', () => {
 const SINCE = '2023-01-08T00:00:00-05:00';
 
 function ownClient() {
-  return fakeClient(async () => ({ ok: true, data: { login: 'octocat', id: 'U_octo' } }));
+  return fakeClient(async () => account(OCTOCAT));
 }
 
 /** `listOwnerRepos` waits until `release` so a second request can overlap the first. */
@@ -248,24 +270,52 @@ describe('in-flight requests and clear cache', () => {
     let calls = 0;
     const client = fakeClient(async () => {
       calls += 1;
-      return calls === 1
-        ? { ok: true, data: { login: 'octocat', id: 'U_octo' } }
-        : { ok: true, data: { login: 'monalisa', id: 'U_1' } };
+      return calls === 1 ? account(OCTOCAT) : account({ login: 'monalisa', id: 'U_1' }, OCTOCAT);
     });
     const release = pauseRepos(client);
     const deps = withDeps({ getToken: async () => 'token', client });
     const first = handleGetContributions(request, deps);
     await vi.waitUntil(() => client.listOwnerRepos.mock.calls.length === 1);
-    await expect(handleGetContributions(request, deps)).resolves.toEqual({
+    await expect(handleGetContributions(request, deps)).resolves.toMatchObject({
       ok: true,
-      data: { viewerLogin: 'monalisa' },
+      data: { login: 'octocat', mode: 'publicOnly' },
     });
     expect(client.listOwnerRepos).toHaveBeenCalledTimes(1);
+    expect(client.listPublicRepos).toHaveBeenCalledTimes(1);
     release();
     await first;
   });
 
-  it('does not publish a flight when the token changes during getViewer', async () => {
+  it('does not share an in-flight promise between the viewer profile and another profile', async () => {
+    const client = fakeClient(async (_token, login) => {
+      const user = login.toLowerCase() === 'octocat' ? OCTOCAT : { login, id: 'U_other' };
+      return account(OCTOCAT, user);
+    });
+    const release = pauseRepos(client);
+    let releasePublic!: () => void;
+    const publicGate = new Promise<void>((resolve) => {
+      releasePublic = resolve;
+    });
+    client.listPublicRepos.mockImplementation(async () => {
+      await publicGate;
+      return { ok: true, data: { items: [], truncated: false } };
+    });
+    const deps = withDeps({ getToken: async () => 'token', client });
+    const own = handleGetContributions(request, deps);
+    await vi.waitUntil(() => client.listOwnerRepos.mock.calls.length === 1);
+    const other = handleGetContributions({ type: 'GET_CONTRIBUTIONS', login: 'hubot' }, deps);
+    await vi.waitUntil(() => client.listPublicRepos.mock.calls.length === 1);
+    expect(client.listOwnerRepos).toHaveBeenCalledTimes(1);
+    release();
+    releasePublic();
+    const [ownResult, otherResult] = await Promise.all([own, other]);
+    expect(ownResult).toMatchObject({ ok: true, data: { mode: 'owner' } });
+    expect(otherResult).toMatchObject({ ok: true, data: { mode: 'publicOnly', login: 'hubot' } });
+    expect(client.listOwnerRepos).toHaveBeenCalledTimes(1);
+    expect(client.listPublicRepos).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not publish a flight when the token changes during getViewerAndUser', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -276,7 +326,7 @@ describe('in-flight requests and clear cache', () => {
       if (calls === 1) {
         await gate;
       }
-      return { ok: true, data: { login: 'octocat', id: 'U_octo' } };
+      return account(OCTOCAT);
     });
     const cache = memoryCache();
     const deps = withDeps({ getToken: async () => 'token', client, cache });

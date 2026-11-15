@@ -1,7 +1,7 @@
 # Plan: Public-Only for Other Profiles
 
 Date: 2026-11-12
-Status: Pending
+Status: In Progress
 
 ## Summary
 

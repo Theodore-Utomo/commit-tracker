@@ -7,12 +7,23 @@ import {
   MERGED_PR_COMMITS,
   OWNER_REPOS,
   PR_COMMITS,
-  VIEWER_QUERY,
+  PUBLIC_REPOS,
+  VIEWER_AND_USER,
 } from '../../../../src/services/github/queries';
 
 const TOKEN = 'test-token';
 const NOW = Date.parse('2026-11-13T00:00:00.000Z');
-const VIEWER = { viewer: { login: 'octocat', id: 'U_1' } };
+const LOGIN = 'octocat';
+const VIEWER = {
+  viewer: { login: 'octocat', id: 'U_1' },
+  user: { id: 'U_1', login: 'octocat', contributionsCollection: { restrictedContributionsCount: 0 } },
+  rateLimit: { remaining: 5000, resetAt: '2026-11-13T01:00:00.000Z' },
+};
+const MAPPED = {
+  viewer: { login: 'octocat', id: 'U_1' },
+  user: { login: 'octocat', id: 'U_1' },
+  restrictedContributionsCount: 0,
+};
 
 function reply(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -31,28 +42,36 @@ function clientReturning(response: Response | Error) {
   return { fetch, client: createGitHubClient({ fetch, now: () => NOW }) };
 }
 
-describe('GitHubClient.getViewer', () => {
-  it('POSTs the viewer query as JSON to the GraphQL endpoint with a bearer token', async () => {
+describe('GitHubClient.getViewerAndUser', () => {
+  it('sends the profile login as a GraphQL variable', async () => {
     const { fetch, client } = clientReturning(reply(200, { data: VIEWER }));
 
-    await expect(client.getViewer(TOKEN)).resolves.toEqual({ ok: true, data: { login: 'octocat', id: 'U_1' } });
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toEqual({ ok: true, data: MAPPED });
 
     expect(fetch).toHaveBeenCalledTimes(1);
     const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe('https://api.github.com/graphql');
     expect(init.method).toBe('POST');
     expect(init.headers).toMatchObject({ 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` });
-    expect(JSON.parse(init.body as string)).toEqual({ query: VIEWER_QUERY });
+    expect(JSON.parse(init.body as string)).toEqual({ query: VIEWER_AND_USER, variables: { login: LOGIN } });
+  });
+
+  it('maps user: null to NOT_FOUND', async () => {
+    const { fetch, client } = clientReturning(
+      reply(200, { data: { viewer: VIEWER.viewer, user: null, rateLimit: VIEWER.rateLimit } }),
+    );
+    await expect(client.getViewerAndUser(TOKEN, 'ghost')).resolves.toEqual({ ok: false, error: 'NOT_FOUND' });
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('maps status 401 to UNAUTHORIZED', async () => {
     const { client } = clientReturning(reply(401, { message: 'Bad credentials' }));
-    await expect(client.getViewer(TOKEN)).resolves.toEqual({ ok: false, error: 'UNAUTHORIZED' });
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toEqual({ ok: false, error: 'UNAUTHORIZED' });
   });
 
   it('maps a 200 body with an UNAUTHENTICATED error to UNAUTHORIZED', async () => {
     const { client } = clientReturning(reply(200, { data: null, errors: [{ type: 'UNAUTHENTICATED' }] }));
-    await expect(client.getViewer(TOKEN)).resolves.toEqual({ ok: false, error: 'UNAUTHORIZED' });
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toEqual({ ok: false, error: 'UNAUTHORIZED' });
   });
 
   it('maps status 403 with x-ratelimit-remaining 0 to RATE_LIMITED with the reset as ISO', async () => {
@@ -60,7 +79,7 @@ describe('GitHubClient.getViewer', () => {
     const { client } = clientReturning(
       reply(403, {}, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(reset) }),
     );
-    await expect(client.getViewer(TOKEN)).resolves.toEqual({
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toEqual({
       ok: false,
       error: 'RATE_LIMITED',
       resetAt: new Date(reset * 1000).toISOString(),
@@ -69,7 +88,7 @@ describe('GitHubClient.getViewer', () => {
 
   it('maps status 429 with retry-after to RATE_LIMITED about that many seconds ahead', async () => {
     const { client } = clientReturning(reply(429, {}, { 'retry-after': '60' }));
-    await expect(client.getViewer(TOKEN)).resolves.toEqual({
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toEqual({
       ok: false,
       error: 'RATE_LIMITED',
       resetAt: new Date(NOW + 60_000).toISOString(),
@@ -80,7 +99,7 @@ describe('GitHubClient.getViewer', () => {
     const { client } = clientReturning(
       reply(200, { data: null, errors: [{ type: 'RATE_LIMITED' }] }, { 'x-ratelimit-reset': '1794528000' }),
     );
-    await expect(client.getViewer(TOKEN)).resolves.toEqual({
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toEqual({
       ok: false,
       error: 'RATE_LIMITED',
       resetAt: new Date(1_794_528_000 * 1000).toISOString(),
@@ -89,7 +108,7 @@ describe('GitHubClient.getViewer', () => {
 
   it('maps a 403 with only retry-after (secondary rate limit) to RATE_LIMITED', async () => {
     const { client } = clientReturning(reply(403, {}, { 'retry-after': '30' }));
-    await expect(client.getViewer(TOKEN)).resolves.toStrictEqual({
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toStrictEqual({
       ok: false,
       error: 'RATE_LIMITED',
       resetAt: new Date(NOW + 30_000).toISOString(),
@@ -100,7 +119,7 @@ describe('GitHubClient.getViewer', () => {
     const { client } = clientReturning(
       reply(429, {}, { 'x-ratelimit-reset': '1794528000', 'retry-after': '60' }),
     );
-    await expect(client.getViewer(TOKEN)).resolves.toStrictEqual({
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toStrictEqual({
       ok: false,
       error: 'RATE_LIMITED',
       resetAt: new Date(1_794_528_000 * 1000).toISOString(),
@@ -112,7 +131,7 @@ describe('GitHubClient.getViewer', () => {
       const { client } = clientReturning(
         reply(403, {}, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': reset, 'retry-after': '60' }),
       );
-      await expect(client.getViewer(TOKEN)).resolves.toStrictEqual({
+      await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toStrictEqual({
         ok: false,
         error: 'RATE_LIMITED',
         resetAt: new Date(NOW + 60_000).toISOString(),
@@ -122,63 +141,63 @@ describe('GitHubClient.getViewer', () => {
 
   it('omits resetAt when no header gives a usable time', async () => {
     const { client } = clientReturning(reply(429, {}, { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' }));
-    await expect(client.getViewer(TOKEN)).resolves.toStrictEqual({ ok: false, error: 'RATE_LIMITED' });
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toStrictEqual({ ok: false, error: 'RATE_LIMITED' });
   });
 
   it('maps a 200 RATE_LIMITED error with no headers to RATE_LIMITED without resetAt', async () => {
     const { client } = clientReturning(reply(200, { data: null, errors: [{ type: 'RATE_LIMITED' }] }));
-    await expect(client.getViewer(TOKEN)).resolves.toStrictEqual({ ok: false, error: 'RATE_LIMITED' });
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toStrictEqual({ ok: false, error: 'RATE_LIMITED' });
   });
 
   it('maps a 200 body with data and an UNAUTHENTICATED error to UNAUTHORIZED, not data', async () => {
     const { client } = clientReturning(reply(200, { data: VIEWER, errors: [{ type: 'UNAUTHENTICATED' }] }));
-    await expect(client.getViewer(TOKEN)).resolves.toStrictEqual({ ok: false, error: 'UNAUTHORIZED' });
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toStrictEqual({ ok: false, error: 'UNAUTHORIZED' });
   });
 
   it('maps a 429 with no rate-limit headers to NETWORK', async () => {
     const { client } = clientReturning(reply(429, {}));
-    await expect(client.getViewer(TOKEN)).resolves.toStrictEqual({ ok: false, error: 'NETWORK' });
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toStrictEqual({ ok: false, error: 'NETWORK' });
   });
 
   it('maps a 403 with remaining quota (a permission error) to NETWORK, not RATE_LIMITED', async () => {
     const { client } = clientReturning(
       reply(403, {}, { 'x-ratelimit-remaining': '12', 'x-ratelimit-reset': '1794528000' }),
     );
-    await expect(client.getViewer(TOKEN)).resolves.toStrictEqual({ ok: false, error: 'NETWORK' });
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toStrictEqual({ ok: false, error: 'NETWORK' });
   });
 
   it('maps 403 without rate-limit headers, 500, and a thrown TypeError to NETWORK', async () => {
     for (const response of [reply(403, {}), reply(500, {}), new TypeError('Failed to fetch')]) {
       const { client } = clientReturning(response);
-      await expect(client.getViewer(TOKEN)).resolves.toEqual({ ok: false, error: 'NETWORK' });
+      await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toEqual({ ok: false, error: 'NETWORK' });
     }
   });
 
   it('maps any other thrown error to UNKNOWN', async () => {
     const { client } = clientReturning(new Error('boom'));
-    await expect(client.getViewer(TOKEN)).resolves.toEqual({ ok: false, error: 'UNKNOWN' });
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toEqual({ ok: false, error: 'UNKNOWN' });
   });
 
   it('returns the data when a 200 body has both data and errors', async () => {
     const errors = [{ type: 'FORBIDDEN', path: ['viewer', 'organization'] }];
     const { client } = clientReturning(reply(200, { data: VIEWER, errors }));
-    await expect(client.getViewer(TOKEN)).resolves.toEqual({
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toEqual({
       ok: true,
-      data: { login: 'octocat', id: 'U_1' },
+      data: MAPPED,
       errors,
     });
   });
 
   it('maps a 200 body with errors and no data to UNKNOWN', async () => {
     const { client } = clientReturning(reply(200, { data: null, errors: [{ type: 'INTERNAL' }] }));
-    await expect(client.getViewer(TOKEN)).resolves.toEqual({ ok: false, error: 'UNKNOWN' });
+    await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toEqual({ ok: false, error: 'UNKNOWN' });
   });
 
   it('maps a body without a viewer, or one that is not JSON, to UNKNOWN', async () => {
     const notJson = new Response('<html>', { status: 200 });
     for (const response of [reply(200, { data: {} }), notJson]) {
       const { client } = clientReturning(response);
-      await expect(client.getViewer(TOKEN)).resolves.toEqual({ ok: false, error: 'UNKNOWN' });
+      await expect(client.getViewerAndUser(TOKEN, LOGIN)).resolves.toEqual({ ok: false, error: 'UNKNOWN' });
     }
   });
 });
@@ -329,6 +348,102 @@ describe('GitHubClient.listOwnerRepos', () => {
   it('returns a failure from any page as the failure', async () => {
     const { client } = scripted([new Response('{}', { status: 500 })]);
     await expect(client.listOwnerRepos(TOKEN, SINCE, createRateBudget())).resolves.toEqual({
+      ok: false,
+      error: 'NETWORK',
+    });
+  });
+});
+
+function publicReposPage(
+  owned: unknown[],
+  contributed: unknown[],
+  cursors: { owned?: string | null; contributed?: string | null } = {},
+  rateLimit = PLENTY,
+) {
+  const connection = (nodes: unknown[], next: string | null | undefined) => ({
+    pageInfo: { hasNextPage: next != null, endCursor: next ?? null },
+    nodes,
+  });
+  return {
+    data: {
+      user: {
+        repositories: connection(owned, cursors.owned),
+        repositoriesContributedTo: connection(contributed, cursors.contributed),
+      },
+      rateLimit,
+    },
+  };
+}
+
+describe('GitHubClient.listPublicRepos', () => {
+  it('requests a second page of repositories and of repositoriesContributedTo', async () => {
+    const { calls, client } = scripted([
+      publicReposPage([repoNode('owned', '2024-01-10T00:00:00Z')], [repoNode('contrib', '2024-01-09T00:00:00Z')], {
+        owned: 'o2',
+        contributed: 'c2',
+      }),
+      publicReposPage([repoNode('owned-2', '2024-01-08T00:00:00Z')], [repoNode('contrib-2', '2024-01-07T00:00:00Z')]),
+    ]);
+    const result = await client.listPublicRepos(TOKEN, 'octocat', SINCE, createRateBudget());
+    expect(calls.map((call) => call.query)).toEqual([PUBLIC_REPOS, PUBLIC_REPOS]);
+    expect(calls[0]?.variables).toMatchObject({
+      login: 'octocat',
+      ownedCursor: null,
+      contributedCursor: null,
+      includeOwned: true,
+      includeContributed: true,
+    });
+    expect(calls[1]?.variables).toMatchObject({ ownedCursor: 'o2', contributedCursor: 'c2' });
+    expect(result.ok && result.data.items.map((item) => item.name)).toEqual(['owned', 'contrib', 'owned-2', 'contrib-2']);
+    expect(result.ok && result.data.truncated).toBe(false);
+  });
+
+  it('stops each connection at the first repository pushed before since', async () => {
+    const { calls, client } = scripted([
+      publicReposPage(
+        [repoNode('kept', '2024-01-10T00:00:00Z'), repoNode('old', '2020-01-01T00:00:00Z')],
+        [repoNode('also', '2024-01-09T00:00:00Z'), repoNode('older', '2019-01-01T00:00:00Z')],
+        { owned: 'o2', contributed: 'c2' },
+      ),
+    ]);
+    const result = await client.listPublicRepos(TOKEN, 'octocat', SINCE, createRateBudget());
+    expect(calls).toHaveLength(1);
+    expect(result.ok && result.data.items.map((item) => item.name)).toEqual(['kept', 'also']);
+    expect(result.ok && result.data.truncated).toBe(false);
+  });
+
+  it('makes no request when the login is not a GitHub login', async () => {
+    const { calls, client } = scripted([]);
+    await expect(client.listPublicRepos(TOKEN, 'not a login', SINCE, createRateBudget())).resolves.toEqual({
+      ok: true,
+      data: { items: [], truncated: false },
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('stops before the next page when the budget falls below 200 and records that rate limit', async () => {
+    const budget = createRateBudget();
+    const { calls, client } = scripted([
+      publicReposPage([repoNode('owned', '2024-01-10T00:00:00Z')], [], { owned: 'o2' }, LOW),
+    ]);
+    const result = await client.listPublicRepos(TOKEN, 'octocat', SINCE, budget);
+    expect(calls).toHaveLength(1);
+    expect(budget.exhausted()).toBe(true);
+    expect(result.ok && result.data.truncated).toBe(true);
+    expect(result.ok && result.data.items.map((item) => item.name)).toEqual(['owned']);
+  });
+
+  it('returns a first-page failure as the failure and a later-page failure as the failure', async () => {
+    const first = scripted([reply(401, {})]);
+    await expect(first.client.listPublicRepos(TOKEN, 'octocat', SINCE, createRateBudget())).resolves.toEqual({
+      ok: false,
+      error: 'UNAUTHORIZED',
+    });
+    const later = scripted([
+      publicReposPage([repoNode('owned', '2024-01-10T00:00:00Z')], [], { owned: 'o2' }),
+      reply(500, {}),
+    ]);
+    await expect(later.client.listPublicRepos(TOKEN, 'octocat', SINCE, createRateBudget())).resolves.toEqual({
       ok: false,
       error: 'NETWORK',
     });
@@ -720,6 +835,12 @@ function prCommitsPage(oids: { oid: string; login?: string | null }[], next: str
 }
 
 describe('GitHubClient.getMergedPrCommits', () => {
+  it('inserts is:public when the caller passes that qualifier', async () => {
+    const { calls, client } = scripted([searchPage([], null)]);
+    await client.getMergedPrCommits(TOKEN, PROFILE, MERGED_SINCE, [], createRateBudget(), ' is:public');
+    expect(calls[0]?.variables.q).toBe('author:monalisa is:pr is:merged is:public merged:>=2023-01-08');
+  });
+
   it('requests the next search page when search.pageInfo.hasNextPage is true', async () => {
     const { calls, client } = scripted([
       searchPage([pullRequestNode(1, 'a1', null)], 'c2', 2),

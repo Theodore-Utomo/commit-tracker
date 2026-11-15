@@ -1,4 +1,5 @@
 import { LOGIN_PATTERN } from '../core/login';
+import { resolveMode } from '../core/privacy';
 import type { Failure, GetContributionsRequest, Response } from '../messaging/protocol';
 import type { CacheEntry, CacheStore } from './cache/store';
 import { getContributions, type ContributionsDeps } from './contributions';
@@ -59,7 +60,7 @@ function emptyTombstone(entry: CacheEntry): CacheEntry {
 }
 
 function flightKey(viewerLogin: string, profileLogin: string): string {
-  return `${viewerLogin}|${profileLogin}|owner`.toLowerCase();
+  return `${viewerLogin}|${profileLogin}|${resolveMode(viewerLogin, profileLogin)}`.toLowerCase();
 }
 
 /**
@@ -112,22 +113,19 @@ export async function handleGetContributions(
       return { ok: false, error: 'NO_TOKEN' };
     }
 
-    // Recorded before getViewer, which is the first GraphQL call. A token change during
+    // Recorded before getViewerAndUser, the first GraphQL call. A token change during
     // that call must not let a later request join this one, and this one must not write.
     const recorded = generation;
     const startedAt = deps.now();
-    const viewer = await deps.client.getViewer(token);
-    if (!viewer.ok) {
-      return failureFrom(viewer);
-    }
-    if (message.login.toLowerCase() !== viewer.data.login.toLowerCase()) {
-      return { ok: true, data: { viewerLogin: viewer.data.login } };
+    const identity = await deps.client.getViewerAndUser(token, message.login);
+    if (!identity.ok) {
+      return failureFrom(identity);
     }
 
     const requestDeps: ContributionsDeps = {
       ...deps,
       startedAt,
-      resolvedViewer: viewer,
+      resolvedViewer: identity,
       resolvedToken: token,
       canWrite: () => generation === recorded,
       cache: guardedCache(deps.cache, recorded),
@@ -136,7 +134,7 @@ export async function handleGetContributions(
       return run(message.login, requestDeps).catch(failed);
     }
 
-    const key = flightKey(viewer.data.login, message.login);
+    const key = flightKey(identity.data.viewer.login, message.login);
     const existing = inFlight.get(key);
     if (existing) {
       return existing;

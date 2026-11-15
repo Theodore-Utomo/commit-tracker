@@ -1,9 +1,41 @@
 import { describe, expect, it } from 'vitest';
-import { policyFor } from '../../../src/core/privacy';
+import { policyFor, resolveMode } from '../../../src/core/privacy';
 import type { PrivacyMode } from '../../../src/core/types';
 import { commit, forkRepo, privateFork, privateRepo, publicRepo } from './fixtures';
 
 const MODES: PrivacyMode[] = ['owner', 'publicPlusCounts', 'publicOnly'];
+
+describe('resolveMode', () => {
+  it('returns owner for equal logins, ignoring case', () => {
+    expect(resolveMode('octocat', 'octocat')).toBe('owner');
+    expect(resolveMode('Octocat', 'octocat')).toBe('owner');
+    expect(resolveMode('octocat', 'Octocat')).toBe('owner');
+  });
+
+  it('returns publicOnly for different logins', () => {
+    expect(resolveMode('octocat', 'hubot')).toBe('publicOnly');
+  });
+});
+
+describe('policy fetch fields', () => {
+  const ids = { viewerId: 'V', userId: 'U' };
+
+  it('gives owner the viewer affiliation, the viewer id, saved emails, and no search qualifier', () => {
+    const policy = policyFor('owner');
+    expect(policy.repoSource).toBe('viewerAffiliated');
+    expect(policy.authorId(ids)).toBe('V');
+    expect(policy.useSavedEmails).toBe(true);
+    expect(policy.prSearchQualifiers).toBe('');
+  });
+
+  it('gives publicOnly public repos, the profile id, no saved emails, and is:public', () => {
+    const policy = policyFor('publicOnly');
+    expect(policy.repoSource).toBe('userPublic');
+    expect(policy.authorId(ids)).toBe('U');
+    expect(policy.useSavedEmails).toBe(false);
+    expect(policy.prSearchQualifiers).toBe(' is:public');
+  });
+});
 
 describe('policyFor', () => {
   it('returns the policy for each mode', () => {

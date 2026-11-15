@@ -32,7 +32,7 @@ describe('sendMessage', () => {
   });
 
   it('returns a Response unchanged and sends the request as given', async () => {
-    const success: Response = { ok: true, data: { viewerLogin: 'octocat' } };
+    const success: Response = { ok: true, data: { cleared: true } };
     const failure: Response = { ok: false, error: 'RATE_LIMITED', resetAt: '2026-11-13T00:00:00.000Z' };
     const send = vi.fn().mockResolvedValueOnce(success).mockResolvedValueOnce(failure);
 

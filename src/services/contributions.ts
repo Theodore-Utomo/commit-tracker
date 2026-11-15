@@ -1,7 +1,7 @@
 import { aggregateByDay, inGridYear, isCountOnly, localDay, startOfLocalDayIso } from '../core/aggregate';
 import { dedupeCommits } from '../core/dedupe';
 import { gridDays } from '../core/grid';
-import { policyFor } from '../core/privacy';
+import { policyFor, resolveMode } from '../core/privacy';
 import type { Commit, Contributions, CountOnly } from '../core/types';
 import type { Failure, Response } from '../messaging/protocol';
 import { SCHEMA_VERSION, type CacheStore } from './cache/store';
@@ -14,7 +14,7 @@ import {
   type GitHubResult,
   type RateBudget,
 } from './github/client';
-import type { Viewer } from './github/mappers';
+import type { ViewerAndUser } from './github/mappers';
 
 /** Repositories fetched at once. */
 const REPO_CONCURRENCY = 4;
@@ -27,15 +27,18 @@ const REPO_CONCURRENCY = 4;
 const OVERLAP_MS = 14 * 86_400_000;
 
 export interface ContributionsDeps {
-  client: Pick<GitHubClient, 'getViewer' | 'listOwnerRepos' | 'getBranchCommits' | 'getMergedPrCommits'>;
+  client: Pick<
+    GitHubClient,
+    'getViewerAndUser' | 'listOwnerRepos' | 'listPublicRepos' | 'getBranchCommits' | 'getMergedPrCommits'
+  >;
   getToken: () => Promise<string | undefined>;
   getCommitEmails: () => Promise<readonly string[]>;
   now: () => Date;
   timeZone: string;
   cache: CacheStore;
-  /** Set when the handler already resolved the viewer, so this function does not fetch it again. */
-  resolvedViewer?: GitHubResult<Viewer>;
-  /** The trimmed token `getViewer` already used. Later calls do not read storage again. */
+  /** Set when the handler already resolved the viewer and profile user, so this function does not fetch them again. */
+  resolvedViewer?: GitHubResult<ViewerAndUser>;
+  /** The trimmed token `getViewerAndUser` already used. Later calls do not read storage again. */
   resolvedToken?: string;
   /** Captured before the first GraphQL call. The grid and `lastSync` both use it. */
   startedAt?: Date;
@@ -44,10 +47,9 @@ export interface ContributionsDeps {
 }
 
 /**
- * One `GET_CONTRIBUTIONS` request. On the viewer's own profile it fetches every non-fork
- * branch commit in the grid year, then merged pull-request commits, and returns `Contributions`
- * in owner mode. On anyone else's profile it returns `{ viewerLogin }` and fetches nothing more.
- * A cache hit refetches from `lastSync − 14 days` and merges with the stored year.
+ * One `GET_CONTRIBUTIONS` request. The viewer's own profile uses owner mode. Any other profile
+ * uses public-only mode: public repositories, no saved emails, and `is:public` on the pull-request
+ * search. A cache hit refetches from `lastSync − 14 days` and merges with the stored year.
  */
 export async function getContributions(login: string, deps: ContributionsDeps): Promise<Response> {
   const { client, timeZone } = deps;
@@ -58,20 +60,18 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
     return { ok: false, error: 'NO_TOKEN' };
   }
 
-  const viewer = deps.resolvedViewer ?? (await client.getViewer(token));
-  if (!viewer.ok) {
-    return toFailure(viewer);
-  }
-  if (login.toLowerCase() !== viewer.data.login.toLowerCase()) {
-    return { ok: true, data: { viewerLogin: viewer.data.login } };
+  const identity = deps.resolvedViewer ?? (await client.getViewerAndUser(token, login));
+  if (!identity.ok) {
+    return toFailure(identity);
   }
 
-  const policy = policyFor('owner');
+  const { viewer, user } = identity.data;
+  const policy = policyFor(resolveMode(viewer.login, login));
   const grid = gridDays(localDay(startedAt.toISOString(), timeZone));
   const gridStartDay = grid[0] as string;
   const gridStartIso = startOfLocalDayIso(gridStartDay, timeZone);
   const cached = await deps.cache.get({
-    viewerLogin: viewer.data.login,
+    viewerLogin: viewer.login,
     profileLogin: login,
     mode: policy.mode,
   });
@@ -80,7 +80,10 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
   const mergedDay = cached === undefined ? gridStartDay : new Date(since).toISOString().slice(0, 10);
   const budget = createRateBudget();
 
-  const repos = await client.listOwnerRepos(token, since, budget);
+  const repos =
+    policy.repoSource === 'viewerAffiliated'
+      ? await client.listOwnerRepos(token, since, budget)
+      : await client.listPublicRepos(token, user.login, since, budget);
   if (!repos.ok) {
     return toFailure(repos);
   }
@@ -94,7 +97,7 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
   let failure: GitHubFailure | undefined;
   // Copies of the narrowed token and repo list. A nested function does not keep that narrowing.
   const authToken = token;
-  const repoList = repos.data.items;
+  const repoList = repos.data.items.filter((repo) => policy.includeRepo(repo));
 
   async function collectBranches(author: CommitAuthor): Promise<void> {
     if (stopped || failure !== undefined || budget.exhausted()) {
@@ -134,10 +137,10 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
     }
   }
 
-  await collectBranches({ id: viewer.data.id });
+  await collectBranches({ id: policy.authorId({ viewerId: viewer.id, userId: user.id }) });
 
   let emails: string[] = [];
-  if (!stopped && failure === undefined && !budget.exhausted()) {
+  if (policy.useSavedEmails && !stopped && failure === undefined && !budget.exhausted()) {
     emails = (await deps.getCommitEmails()).map((email) => email.trim()).filter((email) => email.length > 0);
     if (emails.length > 0) {
       await collectBranches({ emails });
@@ -157,7 +160,14 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
 
   // A branch phase that already stopped, or a budget too low to start, does not search.
   if (!stopped && failure === undefined && !budget.exhausted()) {
-    const prs = await client.getMergedPrCommits(authToken, viewer.data.login, mergedDay, emails, budget);
+    const prs = await client.getMergedPrCommits(
+      authToken,
+      user.login,
+      mergedDay,
+      policy.useSavedEmails ? emails : [],
+      budget,
+      policy.prSearchQualifiers,
+    );
     if (!prs.ok) {
       if (gathered.length === 0) {
         return toFailure(prs);
@@ -190,7 +200,7 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
   }
   const { days, totals } = aggregateByDay(inGridYear(presented, grid, timeZone), timeZone);
   const data: Contributions = {
-    login: viewer.data.login,
+    login: user.login,
     mode: policy.mode,
     days,
     totals,
@@ -200,7 +210,7 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
 
   if (!data.partial && deps.canWrite?.() !== false) {
     await deps.cache.put(
-      { viewerLogin: viewer.data.login, profileLogin: login, mode: policy.mode },
+      { viewerLogin: viewer.login, profileLogin: login, mode: policy.mode },
       { contributions: data, lastSync: startedAt.toISOString(), schemaVersion: SCHEMA_VERSION },
     );
   }

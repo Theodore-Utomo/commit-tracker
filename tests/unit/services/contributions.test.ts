@@ -5,6 +5,7 @@ import type { Commit, Contributions, RepoRef } from '../../../src/core/types';
 import type { Response } from '../../../src/messaging/protocol';
 import { SCHEMA_VERSION, createCacheStore, type CacheEntry, type CacheKey, type CacheStore } from '../../../src/services/cache/store';
 import type { CommitAuthor, GitHubResult, Page, RateBudget } from '../../../src/services/github/client';
+import type { ViewerAndUser } from '../../../src/services/github/mappers';
 import { getContributions, type ContributionsDeps } from '../../../src/services/contributions';
 
 const NEW_YORK = 'America/New_York';
@@ -46,14 +47,28 @@ function fakeClient(options: {
   /** Answers for the `author: { emails }` pass. A missing repo answers with no commits. */
   emailBranches?: Record<string, BranchAnswer>;
   prs?: GitHubResult<Page<Commit>>;
-  viewer?: GitHubResult<typeof VIEWER>;
+  identity?: GitHubResult<ViewerAndUser>;
+  /** Repositories returned by `listPublicRepos`. Defaults to none. */
+  publicRepos?: RepoRef[];
+  publicListResult?: GitHubResult<Page<RepoRef>>;
 }) {
   const client = {
-    getViewer: vi.fn(async () => options.viewer ?? ({ ok: true, data: VIEWER } as const)),
+    getViewerAndUser: vi.fn(async (_token: string, login: string) => {
+      if (options.identity) {
+        return options.identity;
+      }
+      const user = login.toLowerCase() === VIEWER.login.toLowerCase() ? VIEWER : { login, id: `U_${login.toLowerCase()}` };
+      return { ok: true as const, data: { viewer: VIEWER, user, restrictedContributionsCount: 0 } };
+    }),
     listOwnerRepos: vi.fn(async (_token: string, _since: string, budget: RateBudget) => {
       await Promise.resolve();
       budget.record(options.reposRateLimit ?? PLENTY);
       return options.listResult ?? page(options.repos ?? []);
+    }),
+    listPublicRepos: vi.fn(async (_token: string, _login: string, _since: string, budget: RateBudget) => {
+      await Promise.resolve();
+      budget.record(options.reposRateLimit ?? PLENTY);
+      return options.publicListResult ?? page(options.publicRepos ?? []);
     }),
     getBranchCommits: vi.fn(async (_token: string, r: RepoRef, author: CommitAuthor, _since: string, budget: RateBudget) => {
       await Promise.resolve();
@@ -126,36 +141,32 @@ describe('getContributions: who is asked', () => {
       const client = fakeClient({});
       const dependencies = deps(client, { token });
       await expect(getContributions('monalisa', dependencies)).resolves.toEqual({ ok: false, error: 'NO_TOKEN' });
-      expect(client.getViewer).not.toHaveBeenCalled();
+      expect(client.getViewerAndUser).not.toHaveBeenCalled();
       expect(dependencies.getCommitEmails).not.toHaveBeenCalled();
     }
   });
 
   it('passes a viewer failure through, with resetAt only for RATE_LIMITED', async () => {
-    const limited = fakeClient({ viewer: { ok: false, error: 'RATE_LIMITED', resetAt: LOW.resetAt } });
+    const limited = fakeClient({ identity: { ok: false, error: 'RATE_LIMITED', resetAt: LOW.resetAt } });
     await expect(getContributions('monalisa', deps(limited))).resolves.toStrictEqual({
       ok: false,
       error: 'RATE_LIMITED',
       resetAt: LOW.resetAt,
     });
-    const unauthorized = fakeClient({ viewer: { ok: false, error: 'UNAUTHORIZED' } });
+    const unauthorized = fakeClient({ identity: { ok: false, error: 'UNAUTHORIZED' } });
     await expect(getContributions('monalisa', deps(unauthorized))).resolves.toStrictEqual({
       ok: false,
       error: 'UNAUTHORIZED',
     });
   });
 
-  it('returns { viewerLogin } for another login and fetches nothing more', async () => {
-    const client = fakeClient({ repos: [repo('a')] });
-    const dependencies = deps(client);
-    await expect(getContributions('octocat', dependencies)).resolves.toEqual({
-      ok: true,
-      data: { viewerLogin: 'monalisa' },
-    });
+  it('returns NOT_FOUND for an unknown login and lists no repositories', async () => {
+    const client = fakeClient({ identity: { ok: false, error: 'NOT_FOUND' }, publicRepos: [repo('a')] });
+    await expect(getContributions('ghost', deps(client))).resolves.toEqual({ ok: false, error: 'NOT_FOUND' });
+    expect(client.listPublicRepos).not.toHaveBeenCalled();
     expect(client.listOwnerRepos).not.toHaveBeenCalled();
     expect(client.getBranchCommits).not.toHaveBeenCalled();
     expect(client.getMergedPrCommits).not.toHaveBeenCalled();
-    expect(dependencies.getCommitEmails).not.toHaveBeenCalled();
   });
 
   it('treats the viewer login case-insensitively', async () => {
@@ -465,7 +476,7 @@ describe('getContributions: merged pull requests and extra emails', () => {
   it('searches with the viewer login and the grid start, not the URL text', async () => {
     const client = fakeClient({ repos: [] });
     await getContributions('MonaLisa', deps(client));
-    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', '2023-01-08', [], expect.anything());
+    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', '2023-01-08', [], expect.anything(), '');
   });
 
   it('does not count a pull-request commit authored before the grid start', async () => {
@@ -490,7 +501,7 @@ describe('getContributions: merged pull requests and extra emails', () => {
     const data = contributions(await getContributions('monalisa', deps(client, { emails })));
     expect(client.getBranchCommits).toHaveBeenNthCalledWith(1, 'token', a, { id: 'U_viewer' }, SINCE, expect.anything());
     expect(client.getBranchCommits).toHaveBeenNthCalledWith(2, 'token', a, { emails }, SINCE, expect.anything());
-    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', '2023-01-08', emails, expect.anything());
+    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', '2023-01-08', emails, expect.anything(), '');
     expect(data.totals.commits).toBe(2);
     expect(data.days['2024-01-10']?.commits).toEqual([commit('s1', a), commit('e1', a)]);
   });
@@ -500,7 +511,7 @@ describe('getContributions: merged pull requests and extra emails', () => {
     const client = fakeClient({ repos: [a], branches: { a: { result: page([commit('s1', a)]) } } });
     await getContributions('monalisa', deps(client, { emails: ['  ', ''] }));
     expect(client.getBranchCommits).toHaveBeenCalledTimes(1);
-    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', '2023-01-08', [], expect.anything());
+    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', '2023-01-08', [], expect.anything(), '');
   });
 
   it('keeps the branch commit and marks partial when the pull-request search is rate limited or the network fails', async () => {
@@ -647,9 +658,9 @@ describe('getContributions: cache', () => {
       repos: [a],
       branches: { a: { result: page([commit('s1', a)]) } },
     });
-    client.getViewer.mockImplementation(async () => {
+    client.getViewerAndUser.mockImplementation(async () => {
       marks.push('viewer');
-      return { ok: true, data: VIEWER };
+      return { ok: true, data: { viewer: VIEWER, user: VIEWER, restrictedContributionsCount: 0 } };
     });
     const data = contributions(
       await getContributions(
@@ -693,7 +704,7 @@ describe('getContributions: cache', () => {
     expect(again.totals.commits).toBe(1);
     expect(client.listOwnerRepos).toHaveBeenLastCalledWith('token', OVERLAP, expect.anything());
     expect(client.getBranchCommits).toHaveBeenLastCalledWith('token', a, { id: 'U_viewer' }, OVERLAP, expect.anything());
-    expect(client.getMergedPrCommits).toHaveBeenLastCalledWith('token', 'monalisa', '2023-12-28', [], expect.anything());
+    expect(client.getMergedPrCommits).toHaveBeenLastCalledWith('token', 'monalisa', '2023-12-28', [], expect.anything(), '');
   });
 
   it('counts a commit first returned on the second call with an authoredDate before the first lastSync', async () => {
@@ -738,7 +749,7 @@ describe('getContributions: cache', () => {
     const client = fakeClient({ repos: [repo('a')] });
     await getContributions('monalisa', { ...deps(client, { cache }), timeZone: tokyo });
     expect(client.listOwnerRepos).toHaveBeenCalledWith('token', gridStartIso, expect.anything());
-    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', utcDay, [], expect.anything());
+    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', utcDay, [], expect.anything(), '');
   });
 
   it('uses the grid start when lastSync minus 14 days is earlier than the grid', async () => {
@@ -763,7 +774,7 @@ describe('getContributions: cache', () => {
     await getContributions('monalisa', deps(client, { cache }));
     expect(client.listOwnerRepos).toHaveBeenCalledWith('token', SINCE, expect.anything());
     expect(client.getBranchCommits).toHaveBeenCalledWith('token', a, { id: 'U_viewer' }, SINCE, expect.anything());
-    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', '2023-01-08', [], expect.anything());
+    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', '2023-01-08', [], expect.anything(), '');
   });
 
   it('drops a stored commit whose day has rolled out of the grid', async () => {
@@ -824,5 +835,113 @@ describe('getContributions: cache', () => {
     await getContributions('monalisa', deps(client, { cache }));
     expect(client.listOwnerRepos).toHaveBeenCalledWith('token', SINCE, expect.anything());
     expect(client.getBranchCommits).toHaveBeenCalledWith('token', repo('a'), { id: 'U_viewer' }, SINCE, expect.anything());
+  });
+});
+
+const HUBOT = { login: 'hubot', id: 'U_hubot' };
+
+function hubotIdentity(restrictedContributionsCount = 0): GitHubResult<ViewerAndUser> {
+  return { ok: true, data: { viewer: VIEWER, user: HUBOT, restrictedContributionsCount } };
+}
+
+describe('getContributions: another profile is public only', () => {
+  it('lists public repos for the profile user and does not list the viewer affiliation', async () => {
+    const open = repo('open');
+    const secret = repo('secret', { isPrivate: true });
+    const client = fakeClient({ identity: hubotIdentity(5), publicRepos: [open, secret] });
+    const dependencies = deps(client, { emails: ['dev@example.com'] });
+    const data = contributions(await getContributions('Hubot', dependencies));
+
+    expect(data.mode).toBe('publicOnly');
+    expect(data.login).toBe('hubot');
+    expect(client.listPublicRepos).toHaveBeenCalledWith('token', 'hubot', SINCE, expect.anything());
+    expect(client.listOwnerRepos).not.toHaveBeenCalled();
+    expect(client.getBranchCommits).toHaveBeenCalledTimes(1);
+    expect(client.getBranchCommits).toHaveBeenCalledWith('token', open, { id: 'U_hubot' }, SINCE, expect.anything());
+    expect(dependencies.getCommitEmails).not.toHaveBeenCalled();
+  });
+
+  it('treats Octocat and octocat as the viewer and still lists owner repos', async () => {
+    const client = fakeClient({
+      identity: {
+        ok: true,
+        data: {
+          viewer: { login: 'octocat', id: 'U_octo' },
+          user: { login: 'octocat', id: 'U_octo' },
+          restrictedContributionsCount: 0,
+        },
+      },
+    });
+    await getContributions('Octocat', deps(client));
+    expect(client.listOwnerRepos).toHaveBeenCalled();
+    expect(client.listPublicRepos).not.toHaveBeenCalled();
+  });
+
+  it('searches with the login GitHub returned and keeps a private pull request off the days', async () => {
+    const open = repo('open');
+    const secretRepo = repo('secret', { isPrivate: true });
+    const kept = prOnly('pub1', open);
+    const hidden = prOnly('priv1', secretRepo, { messageHeadline: 'private work' });
+    const client = fakeClient({ identity: hubotIdentity(), publicRepos: [open], prs: page([kept, hidden]) });
+    const data = contributions(await getContributions('Hubot', deps(client)));
+
+    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'hubot', '2023-01-08', [], expect.anything(), ' is:public');
+    expect(data.days['2024-01-10']?.commits).toEqual([kept]);
+    expect(JSON.stringify(data)).not.toContain('secret');
+    expect(JSON.stringify(data)).not.toContain('private work');
+  });
+
+  it('keeps a private owner pull request and does not add is:public', async () => {
+    const secretRepo = repo('secret', { isPrivate: true });
+    const hidden = prOnly('priv1', secretRepo, { messageHeadline: 'private work' });
+    const client = fakeClient({ repos: [], prs: page([hidden]) });
+    const data = contributions(await getContributions('monalisa', deps(client)));
+    expect(client.getMergedPrCommits).toHaveBeenCalledWith('token', 'monalisa', '2023-01-08', [], expect.anything(), '');
+    expect(data.days['2024-01-10']?.commits).toEqual([hidden]);
+    expect(data.mode).toBe('owner');
+  });
+
+  it('caches publicOnly on its own key and does not read an owner entry for that profile', async () => {
+    const cache = memoryCache();
+    const secret = commit('secret', repo('hidden', { isPrivate: true }), { messageHeadline: 'do not leak' });
+    await cache.put(
+      { viewerLogin: 'monalisa', profileLogin: 'hubot', mode: 'owner' },
+      {
+        schemaVersion: SCHEMA_VERSION,
+        lastSync: NOW.toISOString(),
+        contributions: {
+          login: 'hubot',
+          mode: 'owner',
+          days: { '2024-01-10': { date: '2024-01-10', count: 1, commits: [secret] } },
+          totals: { commits: 1, repos: 1 },
+          partial: false,
+          fetchedAt: NOW.toISOString(),
+        },
+      },
+    );
+    const client = fakeClient({ identity: hubotIdentity(), publicRepos: [] });
+    const data = contributions(await getContributions('hubot', deps(client, { cache })));
+    expect(data.mode).toBe('publicOnly');
+    expect(data.totals.commits).toBe(0);
+    expect(JSON.stringify(data)).not.toContain('do not leak');
+    expect(cache.get).toHaveBeenCalledWith({ viewerLogin: 'monalisa', profileLogin: 'hubot', mode: 'publicOnly' });
+    expect(cache.put).toHaveBeenCalledWith(
+      { viewerLogin: 'monalisa', profileLogin: 'hubot', mode: 'publicOnly' },
+      expect.objectContaining({ schemaVersion: SCHEMA_VERSION, contributions: data }),
+    );
+  });
+
+  it('does not write a partial publicOnly result', async () => {
+    const open = repo('open');
+    const cache = memoryCache();
+    const client = fakeClient({
+      identity: hubotIdentity(),
+      publicRepos: [open],
+      branches: { open: { result: page([commit('k1', open)], true) } },
+    });
+    const data = contributions(await getContributions('hubot', deps(client, { cache })));
+    expect(data.partial).toBe(true);
+    expect(data.mode).toBe('publicOnly');
+    expect(cache.put).not.toHaveBeenCalled();
   });
 });
