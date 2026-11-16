@@ -6,9 +6,9 @@ import {
   handleClearCache,
   handleGetContributions,
   handleOpenOptions,
-  onTokenChanged,
+  onSettingsChanged,
 } from '../services/handle-message';
-import { getCommitEmails, getToken, watchToken } from '../services/settings';
+import { getCommitEmails, getToken, watchCommitEmails, watchToken } from '../services/settings';
 
 export default defineBackground(() => {
   const cache = createCacheStore();
@@ -21,7 +21,8 @@ export default defineBackground(() => {
     cache,
   };
 
-  watchToken(onTokenChanged);
+  watchToken(onSettingsChanged);
+  watchCommitEmails(onSettingsChanged);
 
   browser.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
     if (sender.id !== browser.runtime.id || !isRequest(message)) {

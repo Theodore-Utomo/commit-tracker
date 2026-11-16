@@ -1,9 +1,8 @@
 import { LOGIN_PATTERN } from '../core/login';
 import { resolveMode } from '../core/privacy';
-import type { Failure, GetContributionsRequest, Response } from '../messaging/protocol';
+import type { GetContributionsRequest, Response } from '../messaging/protocol';
 import type { CacheEntry, CacheStore } from './cache/store';
-import { getContributions, type ContributionsDeps } from './contributions';
-import type { GitHubFailure } from './github/client';
+import { getContributions, toFailure, type ContributionsDeps } from './contributions';
 
 /**
  * Shared by every request in this worker. A second request joins only when the viewer,
@@ -27,16 +26,10 @@ function enqueue<T>(op: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** Drops in-flight work and blocks writes that started under the previous token. */
-export function onTokenChanged(): void {
+/** Drops in-flight work and blocks writes that started under the previous token or saved emails. */
+export function onSettingsChanged(): void {
   generation += 1;
   inFlight.clear();
-}
-
-function failureFrom(failure: GitHubFailure): Failure {
-  return failure.error === 'RATE_LIMITED' && failure.resetAt
-    ? { ok: false, error: 'RATE_LIMITED', resetAt: failure.resetAt }
-    : { ok: false, error: failure.error };
 }
 
 function failed(error: unknown): Response {
@@ -119,7 +112,7 @@ export async function handleGetContributions(
     const startedAt = deps.now();
     const identity = await deps.client.getViewerAndUser(token, message.login);
     if (!identity.ok) {
-      return failureFrom(identity);
+      return toFailure(identity);
     }
 
     const requestDeps: ContributionsDeps = {

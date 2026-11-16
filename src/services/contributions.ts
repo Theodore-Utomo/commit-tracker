@@ -2,7 +2,7 @@ import { aggregateByDay, inGridYear, isCountOnly, localDay, startOfLocalDayIso }
 import { dedupeCommits } from '../core/dedupe';
 import { gridDays } from '../core/grid';
 import { policyFor, resolveMode } from '../core/privacy';
-import type { Commit, Contributions, CountOnly } from '../core/types';
+import type { Commit, Contributions, CountOnly, RepoRef } from '../core/types';
 import type { Failure, Response } from '../messaging/protocol';
 import { SCHEMA_VERSION, type CacheStore } from './cache/store';
 import { mapPool } from './concurrency';
@@ -29,7 +29,12 @@ const OVERLAP_MS = 14 * 86_400_000;
 export interface ContributionsDeps {
   client: Pick<
     GitHubClient,
-    'getViewerAndUser' | 'listOwnerRepos' | 'listPublicRepos' | 'getBranchCommits' | 'getMergedPrCommits'
+    | 'getViewerAndUser'
+    | 'listOwnerRepos'
+    | 'listPublicRepos'
+    | 'getBranchCommits'
+    | 'getMergedPrCommits'
+    | 'getRepoStates'
   >;
   getToken: () => Promise<string | undefined>;
   getCommitEmails: () => Promise<readonly string[]>;
@@ -50,6 +55,7 @@ export interface ContributionsDeps {
  * One `GET_CONTRIBUTIONS` request. The viewer's own profile uses owner mode. Any other profile
  * uses public-only mode: public repositories, no saved emails, and `is:public` on the pull-request
  * search. A cache hit refetches from `lastSync − 14 days` and merges with the stored year.
+ * Stored commits are shown only after their repository's current visibility is known.
  */
 export async function getContributions(login: string, deps: ContributionsDeps): Promise<Response> {
   const { client, timeZone } = deps;
@@ -70,11 +76,17 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
   const grid = gridDays(localDay(startedAt.toISOString(), timeZone));
   const gridStartDay = grid[0] as string;
   const gridStartIso = startOfLocalDayIso(gridStartDay, timeZone);
-  const cached = await deps.cache.get({
+  const emails = policy.useSavedEmails
+    ? (await deps.getCommitEmails()).map((email) => email.trim()).filter((email) => email.length > 0)
+    : [];
+  const emailsKey = await fingerprint(emails);
+  const stored = await deps.cache.get({
     viewerLogin: viewer.login,
     profileLogin: login,
     mode: policy.mode,
   });
+  // An entry fetched with other saved emails is a miss: its year is missing or keeps the wrong commits.
+  const cached = stored !== undefined && (stored.emailsKey ?? '') === emailsKey ? stored : undefined;
   const since = cached === undefined ? gridStartIso : overlapSince(cached.lastSync, gridStartIso);
   // A miss searches from the local grid day. A hit uses the UTC day of the overlap timestamp.
   const mergedDay = cached === undefined ? gridStartDay : new Date(since).toISOString().slice(0, 10);
@@ -139,12 +151,8 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
 
   await collectBranches({ id: policy.authorId({ viewerId: viewer.id, userId: user.id }) });
 
-  let emails: string[] = [];
-  if (policy.useSavedEmails && !stopped && failure === undefined && !budget.exhausted()) {
-    emails = (await deps.getCommitEmails()).map((email) => email.trim()).filter((email) => email.length > 0);
-    if (emails.length > 0) {
-      await collectBranches({ emails });
-    }
+  if (emails.length > 0 && !stopped && failure === undefined && !budget.exhausted()) {
+    await collectBranches({ emails });
   }
 
   if (gathered.length === 0) {
@@ -164,7 +172,7 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
       authToken,
       user.login,
       mergedDay,
-      policy.useSavedEmails ? emails : [],
+      emails,
       budget,
       policy.prSearchQualifiers,
     );
@@ -184,16 +192,43 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
     }
   }
 
-  const stored = cached === undefined ? { commits: [], counts: [] } : commitsIn(cached.contributions);
+  const fromCache = cached === undefined ? { commits: [], counts: [] } : commitsIn(cached.contributions);
+  // Visibility can change after a commit is cached. Listed repositories are current; the rest are asked.
+  const current = new Map<string, RepoRef | null>();
+  for (const repo of repos.data.items) {
+    current.set(repoKey(repo), repo);
+  }
+  const unknown = distinctRepos(fromCache.commits).filter((repo) => !current.has(repoKey(repo)));
+  if (unknown.length > 0 && !budget.exhausted()) {
+    const states = await client.getRepoStates(authToken, unknown, budget);
+    if (!states.ok) {
+      failure ??= states;
+    } else {
+      for (const { checked, current: now } of states.data.items) {
+        current.set(repoKey(checked), now);
+      }
+      failure ??= states.data.failure;
+    }
+  }
+  const storedCommits: Commit[] = [];
+  for (const commit of fromCache.commits) {
+    const now = current.get(repoKey(commit.repo));
+    if (now === undefined) {
+      stopped = true; // not checked: dropped, and the result is partial so it is not cached
+    } else if (now !== null) {
+      storedCommits.push({ ...commit, repo: now });
+    }
+  }
+
   const presented: (Commit | CountOnly)[] = [];
-  for (const commit of dedupeCommits([...stored.commits, ...gathered])) {
+  for (const commit of dedupeCommits([...storedCommits, ...gathered])) {
     const kept = policy.includeRepo(commit.repo) ? policy.present(commit) : undefined;
     if (kept !== undefined) {
       presented.push(kept);
     }
   }
   const seen = new Set(presented.map((item) => item.sha));
-  for (const count of stored.counts) {
+  for (const count of fromCache.counts) {
     if (!seen.has(count.sha)) {
       presented.push(count);
     }
@@ -211,7 +246,7 @@ export async function getContributions(login: string, deps: ContributionsDeps): 
   if (!data.partial && deps.canWrite?.() !== false) {
     await deps.cache.put(
       { viewerLogin: viewer.login, profileLogin: login, mode: policy.mode },
-      { contributions: data, lastSync: startedAt.toISOString(), schemaVersion: SCHEMA_VERSION },
+      { contributions: data, lastSync: startedAt.toISOString(), schemaVersion: SCHEMA_VERSION, emailsKey },
     );
   }
 
@@ -239,7 +274,30 @@ function commitsIn(contributions: Contributions): { commits: Commit[]; counts: C
   return { commits, counts };
 }
 
-function toFailure(failure: GitHubFailure): Failure {
+function repoKey(repo: RepoRef): string {
+  return `${repo.owner.toLowerCase()}/${repo.name.toLowerCase()}`;
+}
+
+function distinctRepos(commits: readonly Commit[]): RepoRef[] {
+  const byKey = new Map<string, RepoRef>();
+  for (const commit of commits) {
+    byKey.set(repoKey(commit.repo), commit.repo);
+  }
+  return [...byKey.values()];
+}
+
+/** SHA-256 hex of the sorted, lowercased emails, so the cache never holds an address. `''` for none. */
+async function fingerprint(emails: readonly string[]): Promise<string> {
+  if (emails.length === 0) {
+    return '';
+  }
+  const text = [...new Set(emails.map((email) => email.toLowerCase()))].sort().join('\n');
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+/** A client failure as a response. `resetAt` is kept only with `RATE_LIMITED`. */
+export function toFailure(failure: GitHubFailure): Failure {
   return failure.error === 'RATE_LIMITED' && failure.resetAt
     ? { ok: false, error: 'RATE_LIMITED', resetAt: failure.resetAt }
     : { ok: false, error: failure.error };

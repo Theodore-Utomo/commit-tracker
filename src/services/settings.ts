@@ -54,6 +54,13 @@ export async function getCommitEmails(): Promise<string[]> {
   return cleanEmails(await emailsItem.getValue());
 }
 
+/** Calls `onChange` when the saved emails change. The new list is not passed on. */
+export function watchCommitEmails(onChange: () => void): void {
+  emailsItem.watch(() => {
+    onChange();
+  });
+}
+
 /** Saves a trimmed email list. Blank entries are dropped. */
 export async function setCommitEmails(emails: readonly string[]): Promise<void> {
   await emailsItem.setValue(cleanEmails(emails));

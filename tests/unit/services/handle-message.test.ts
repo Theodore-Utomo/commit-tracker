@@ -8,7 +8,7 @@ import {
   handleClearCache,
   handleGetContributions,
   handleOpenOptions,
-  onTokenChanged,
+  onSettingsChanged,
 } from '../../../src/services/handle-message';
 
 const request: GetContributionsRequest = { type: 'GET_CONTRIBUTIONS', login: 'octocat' };
@@ -26,6 +26,10 @@ function fakeClient(getViewerAndUser: GitHubClient['getViewerAndUser']) {
     getMergedPrCommits: vi.fn<GitHubClient['getMergedPrCommits']>(async () => ({
       ok: true,
       data: { items: [], truncated: false },
+    })),
+    getRepoStates: vi.fn<GitHubClient['getRepoStates']>(async (_token, repos) => ({
+      ok: true,
+      data: { items: repos.map((repo) => ({ checked: repo, current: repo })), truncated: false },
     })),
   };
 }
@@ -57,7 +61,7 @@ const viewerClient = () =>
   );
 
 beforeEach(() => {
-  onTokenChanged();
+  onSettingsChanged();
 });
 
 describe('handleGetContributions', () => {
@@ -337,7 +341,7 @@ describe('in-flight requests and clear cache', () => {
     const deps = withDeps({ getToken: async () => 'token', client, cache });
     const first = handleGetContributions(request, deps);
     await vi.waitUntil(() => calls === 1);
-    onTokenChanged();
+    onSettingsChanged();
     release();
     await vi.waitUntil(() => client.listOwnerRepos.mock.calls.length === 1);
     const second = handleGetContributions(request, deps);
@@ -353,7 +357,7 @@ describe('in-flight requests and clear cache', () => {
     const deps = withDeps({ getToken: async () => 'token', client, cache });
     const first = handleGetContributions(request, deps);
     await vi.waitUntil(() => client.listOwnerRepos.mock.calls.length === 1);
-    onTokenChanged();
+    onSettingsChanged();
     const second = handleGetContributions(request, deps);
     await vi.waitUntil(() => client.listOwnerRepos.mock.calls.length === 2);
     release();
@@ -410,7 +414,7 @@ describe('in-flight requests and clear cache', () => {
     const client = ownClient();
     const pending = handleGetContributions(request, withDeps({ getToken: async () => 'token', client, cache }));
     await started;
-    onTokenChanged();
+    onSettingsChanged();
     release();
     await pending;
     await expect(cache.get({ viewerLogin: 'octocat', profileLogin: 'octocat', mode: 'owner' })).resolves.toBeUndefined();

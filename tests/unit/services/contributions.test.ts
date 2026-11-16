@@ -4,7 +4,7 @@ import { gridDays } from '../../../src/core/grid';
 import type { Commit, Contributions, RepoRef } from '../../../src/core/types';
 import type { Response } from '../../../src/messaging/protocol';
 import { SCHEMA_VERSION, createCacheStore, type CacheEntry, type CacheKey, type CacheStore } from '../../../src/services/cache/store';
-import type { CommitAuthor, GitHubResult, Page, RateBudget } from '../../../src/services/github/client';
+import type { CommitAuthor, GitHubResult, Page, RateBudget, RepoState } from '../../../src/services/github/client';
 import type { ViewerAndUser } from '../../../src/services/github/mappers';
 import { getContributions, type ContributionsDeps } from '../../../src/services/contributions';
 
@@ -51,6 +51,9 @@ function fakeClient(options: {
   /** Repositories returned by `listPublicRepos`. Defaults to none. */
   publicRepos?: RepoRef[];
   publicListResult?: GitHubResult<Page<RepoRef>>;
+  /** Current state by `owner/name` for `getRepoStates`. `null`: gone or hidden. Missing: unchanged. */
+  repoStates?: Record<string, RepoRef | null>;
+  repoStatesResult?: GitHubResult<Page<RepoState>>;
 }) {
   const client = {
     getViewerAndUser: vi.fn(async (_token: string, login: string) => {
@@ -78,6 +81,20 @@ function fakeClient(options: {
       return answer.result;
     }),
     getMergedPrCommits: vi.fn(async () => options.prs ?? page<Commit>([])),
+    /** Each stored repository is unchanged unless `repoStates` says otherwise. */
+    getRepoStates: vi.fn(async (_token: string, repos: readonly RepoRef[], budget: RateBudget) => {
+      await Promise.resolve();
+      budget.record(PLENTY);
+      if (options.repoStatesResult) {
+        return options.repoStatesResult;
+      }
+      const states = repos.map((checked) => {
+        const key = `${checked.owner}/${checked.name}`;
+        const current = options.repoStates && key in options.repoStates ? (options.repoStates[key] ?? null) : checked;
+        return { checked, current };
+      });
+      return page(states);
+    }),
   } satisfies ContributionsDeps['client'];
   return client;
 }
@@ -943,5 +960,185 @@ describe('getContributions: another profile is public only', () => {
     expect(data.partial).toBe(true);
     expect(data.mode).toBe('publicOnly');
     expect(cache.put).not.toHaveBeenCalled();
+  });
+});
+
+describe('getContributions: stored commits follow the repository as it is now', () => {
+  /** First call lists `open` as public; the second lists nothing, so the stored repository must be asked about. */
+  function publicThenGone(prior: RepoRef) {
+    const options: Parameters<typeof fakeClient>[0] = {
+      identity: hubotIdentity(),
+      publicRepos: [prior],
+      branches: { [prior.name]: { result: page([commit('s1', prior, { messageHeadline: 'was public' })]) } },
+    };
+    const client = fakeClient(options);
+    const cache = memoryCache();
+    return { options, client, cache };
+  }
+
+  it('drops a cached publicOnly commit once its repository has gone private', async () => {
+    const open = repo('open');
+    const { options, client, cache } = publicThenGone(open);
+    await getContributions('hubot', deps(client, { cache }));
+
+    options.publicRepos = [];
+    options.branches = {};
+    options.repoStates = { 'acme/open': repo('open', { isPrivate: true }) };
+    const again = contributions(await getContributions('hubot', deps(client, { cache })));
+
+    expect(client.getRepoStates).toHaveBeenCalledWith('token', [open], expect.anything());
+    expect(again.totals.commits).toBe(0);
+    expect(JSON.stringify(again)).not.toContain('was public');
+    expect(JSON.stringify(again)).not.toContain('acme');
+  });
+
+  it('drops a cached commit whose repository is gone or hidden from the token', async () => {
+    const { options, client, cache } = publicThenGone(repo('open'));
+    await getContributions('hubot', deps(client, { cache }));
+
+    options.publicRepos = [];
+    options.repoStates = { 'acme/open': null };
+    const again = contributions(await getContributions('hubot', deps(client, { cache })));
+    expect(again.totals.commits).toBe(0);
+    expect(again.partial).toBe(false);
+  });
+
+  it('keeps a cached commit whose repository is still public, and does not ask about a listed one', async () => {
+    const open = repo('open');
+    const { options, client, cache } = publicThenGone(open);
+    await getContributions('hubot', deps(client, { cache }));
+    const again = contributions(await getContributions('hubot', deps(client, { cache })));
+    expect(again.totals.commits).toBe(1);
+    expect(client.getRepoStates).not.toHaveBeenCalled();
+
+    options.publicRepos = [];
+    const third = contributions(await getContributions('hubot', deps(client, { cache })));
+    expect(client.getRepoStates).toHaveBeenCalledTimes(1);
+    expect(third.days['2024-01-10']?.commits).toEqual([commit('s1', open, { messageHeadline: 'was public' })]);
+  });
+
+  it('skips the lookup when the budget is low, drops unlisted stored commits, and does not cache', async () => {
+    const { options, client, cache } = publicThenGone(repo('open'));
+    await getContributions('hubot', deps(client, { cache }));
+    vi.mocked(cache.put).mockClear();
+
+    options.publicRepos = [];
+    options.reposRateLimit = LOW;
+    const again = contributions(await getContributions('hubot', deps(client, { cache })));
+    expect(client.getRepoStates).not.toHaveBeenCalled();
+    expect(again.totals.commits).toBe(0);
+    expect(again.partial).toBe(true);
+    expect(cache.put).not.toHaveBeenCalled();
+  });
+
+  it('keeps an owner commit whose repository went private, with isPrivate refreshed', async () => {
+    const a = repo('a');
+    const options: Parameters<typeof fakeClient>[0] = {
+      repos: [a],
+      branches: { a: { result: page([commit('s1', a, { messageHeadline: 'mine' })]) } },
+    };
+    const client = fakeClient(options);
+    const cache = memoryCache();
+    await getContributions('monalisa', deps(client, { cache }));
+
+    options.repos = [];
+    options.branches = {};
+    options.repoStates = { 'acme/a': repo('a', { isPrivate: true }) };
+    const again = contributions(await getContributions('monalisa', deps(client, { cache })));
+    expect(again.days['2024-01-10']?.commits).toEqual([
+      commit('s1', repo('a', { isPrivate: true }), { messageHeadline: 'mine' }),
+    ]);
+  });
+
+  it('matches a stored repository to a listed one regardless of case', async () => {
+    const { options, client, cache } = publicThenGone(repo('open'));
+    await getContributions('hubot', deps(client, { cache }));
+
+    options.publicRepos = [{ owner: 'Acme', name: 'Open', isPrivate: false, isFork: false }];
+    options.branches = {};
+    const again = contributions(await getContributions('hubot', deps(client, { cache })));
+    expect(client.getRepoStates).not.toHaveBeenCalled();
+    expect(again.totals.commits).toBe(1);
+    expect(again.days['2024-01-10']?.commits?.[0]).toMatchObject({ repo: { owner: 'Acme', name: 'Open' } });
+  });
+
+  it('drops unverified cached commits and does not cache when the lookup fails', async () => {
+    const { options, client, cache } = publicThenGone(repo('open'));
+    await getContributions('hubot', deps(client, { cache }));
+    vi.mocked(cache.put).mockClear();
+
+    options.publicRepos = [];
+    options.repoStatesResult = { ok: false, error: 'NETWORK' };
+    const again = contributions(await getContributions('hubot', deps(client, { cache })));
+    expect(again.totals.commits).toBe(0);
+    expect(again.partial).toBe(true);
+    expect(cache.put).not.toHaveBeenCalled();
+  });
+
+  it('drops cached commits left unchecked by a truncated lookup and marks the result partial', async () => {
+    const { options, client, cache } = publicThenGone(repo('open'));
+    await getContributions('hubot', deps(client, { cache }));
+    vi.mocked(cache.put).mockClear();
+
+    options.publicRepos = [];
+    options.repoStatesResult = page<RepoState>([], true);
+    const again = contributions(await getContributions('hubot', deps(client, { cache })));
+    expect(again.totals.commits).toBe(0);
+    expect(again.partial).toBe(true);
+    expect(cache.put).not.toHaveBeenCalled();
+  });
+});
+
+describe('getContributions: saved emails are part of the cache entry', () => {
+  it('treats an entry fetched with other saved emails as a miss and refetches from the grid start', async () => {
+    const a = repo('a');
+    const cache = memoryCache();
+    const client = fakeClient({ repos: [a], emailBranches: { a: { result: page([commit('old', a)]) } } });
+    await getContributions('monalisa', deps(client, { cache }));
+
+    await getContributions('monalisa', deps(client, { cache, emails: ['dev@example.com'] }));
+    expect(client.listOwnerRepos).toHaveBeenLastCalledWith('token', SINCE, expect.anything());
+    expect(client.getBranchCommits).toHaveBeenLastCalledWith('token', a, { emails: ['dev@example.com'] }, SINCE, expect.anything());
+
+    // Same emails, in another order and case: a hit.
+    await getContributions('monalisa', deps(client, { cache, emails: ['DEV@example.com'] }));
+    expect(client.listOwnerRepos).toHaveBeenLastCalledWith('token', OVERLAP, expect.anything());
+
+    // Removing the email is a miss again, and the email's commits leave the graph.
+    const removed = contributions(await getContributions('monalisa', deps(client, { cache })));
+    expect(client.listOwnerRepos).toHaveBeenLastCalledWith('token', SINCE, expect.anything());
+    expect(removed.totals.commits).toBe(0);
+  });
+
+  it('stores a fingerprint, never the address', async () => {
+    const cache = memoryCache();
+    await getContributions('monalisa', deps(fakeClient({ repos: [repo('a')] }), { cache, emails: ['dev@example.com'] }));
+    const [, entry] = vi.mocked(cache.put).mock.calls[0] ?? [];
+    expect(entry?.emailsKey).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(entry)).not.toContain('dev@example.com');
+  });
+
+  it('reads an entry from before fingerprints as a hit only when no emails are saved', async () => {
+    const cache = memoryCache();
+    const legacy: CacheEntry = {
+      schemaVersion: SCHEMA_VERSION,
+      lastSync: NOW.toISOString(),
+      contributions: {
+        login: 'monalisa',
+        mode: 'owner',
+        days: {},
+        totals: { commits: 0, repos: 0 },
+        partial: false,
+        fetchedAt: NOW.toISOString(),
+      },
+    };
+    await cache.put({ viewerLogin: 'monalisa', profileLogin: 'monalisa', mode: 'owner' }, legacy);
+    const client = fakeClient({ repos: [] });
+    await getContributions('monalisa', deps(client, { cache }));
+    expect(client.listOwnerRepos).toHaveBeenLastCalledWith('token', OVERLAP, expect.anything());
+
+    await cache.put({ viewerLogin: 'monalisa', profileLogin: 'monalisa', mode: 'owner' }, legacy);
+    await getContributions('monalisa', deps(client, { cache, emails: ['dev@example.com'] }));
+    expect(client.listOwnerRepos).toHaveBeenLastCalledWith('token', SINCE, expect.anything());
   });
 });

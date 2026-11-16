@@ -8,9 +8,11 @@ import {
   mapPrCommitPage,
   mapPublicRepos,
   mapRateLimit,
+  mapRepoStates,
   mapRepos,
   mapViewerAndUser,
   type RateLimit,
+  type RepoState,
   type ViewerAndUser,
 } from './mappers';
 import {
@@ -20,8 +22,12 @@ import {
   OWNER_REPOS,
   PR_COMMITS,
   PUBLIC_REPOS,
+  REPO_STATES_BATCH,
+  repoStatesQuery,
   VIEWER_AND_USER,
 } from './queries';
+
+export type { RepoState };
 
 const GRAPHQL_URL = 'https://api.github.com/graphql';
 
@@ -142,6 +148,11 @@ export interface GitHubClient {
     budget: RateBudget,
     prSearchQualifiers?: string,
   ): Promise<GitHubResult<Page<Commit>>>;
+  /**
+   * The current visibility of each repository, in batches of `REPO_STATES_BATCH`. A repository
+   * missing from the items was not checked: the budget ran low (`truncated`) or a batch failed.
+   */
+  getRepoStates(token: string, repos: readonly RepoRef[], budget: RateBudget): Promise<GitHubResult<Page<RepoState>>>;
 }
 
 type Fetch = (input: string, init: RequestInit) => Promise<globalThis.Response>;
@@ -456,6 +467,40 @@ export function createGitHubClient(options: ClientOptions = {}): GitHubClient {
         cursor = page.nextCursor;
       }
     },
+
+    async getRepoStates(token, repos, budget) {
+      const states: RepoState[] = [];
+      let truncated = false;
+      for (let start = 0; start < repos.length; start += REPO_STATES_BATCH) {
+        if (budget.exhausted()) {
+          return { ok: true, data: { items: states, truncated: true } };
+        }
+        const batch = repos.slice(start, start + REPO_STATES_BATCH);
+        const variables: Record<string, string> = {};
+        batch.forEach((repo, i) => {
+          variables[`o${i}`] = repo.owner;
+          variables[`n${i}`] = repo.name;
+        });
+        const result = await graphql(token, repoStatesQuery(batch.length), variables);
+        if (!result.ok) {
+          return start === 0 ? result : { ok: true, data: { items: states, truncated: true, failure: result } };
+        }
+        budget.record(mapRateLimit(result.data));
+        // A null alias means gone only when GitHub says so. Any other error (a timeout), or a
+        // missing or malformed alias, leaves that repository unchecked.
+        const unsure = aliasesWithOtherErrors(result.errors);
+        const byRepo = new Map(mapRepoStates(result.data, batch).map((state) => [state.checked, state]));
+        batch.forEach((repo, i) => {
+          const state = byRepo.get(repo);
+          if (state === undefined || unsure.has(`r${i}`)) {
+            truncated = true;
+          } else {
+            states.push(state);
+          }
+        });
+      }
+      return { ok: true, data: { items: states, truncated } };
+    },
   };
 }
 
@@ -470,6 +515,18 @@ function isRepoHidden(errors: GraphQLError[] | undefined): boolean {
       error.path?.length === 1 &&
       error.path[0] === 'repository',
   );
+}
+
+/** Top-level aliases (`r0`, ...) with an error other than `NOT_FOUND` or `FORBIDDEN`. */
+function aliasesWithOtherErrors(errors: GraphQLError[] | undefined): Set<string> {
+  const aliases = new Set<string>();
+  for (const error of errors ?? []) {
+    const alias = error.path?.[0];
+    if (typeof alias === 'string' && error.type !== 'NOT_FOUND' && error.type !== 'FORBIDDEN') {
+      aliases.add(alias);
+    }
+  }
+  return aliases;
 }
 
 /** Indexes of `search.nodes` that a `FORBIDDEN` error points at. Those pull requests are skipped. */
