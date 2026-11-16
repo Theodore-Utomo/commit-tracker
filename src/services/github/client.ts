@@ -15,8 +15,6 @@ import {
   type RepoState,
   type ViewerAndUser,
 } from './mappers';
-
-export type { RepoState };
 import {
   BRANCH_COMMITS,
   BRANCH_HISTORY,
@@ -28,6 +26,8 @@ import {
   repoStatesQuery,
   VIEWER_AND_USER,
 } from './queries';
+
+export type { RepoState };
 
 const GRAPHQL_URL = 'https://api.github.com/graphql';
 

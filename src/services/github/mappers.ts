@@ -100,12 +100,6 @@ export function mapViewerAndUser(data: unknown): ViewerAndUserMapped {
   };
 }
 
-/** A repository as it was stored, and as GitHub reports it now. `null`: gone or hidden from the token. */
-export interface RepoState {
-  checked: RepoRef;
-  current: RepoRef | null;
-}
-
 /** The `rateLimit` block of a response's `data`, or `undefined` when absent or malformed. */
 export function mapRateLimit(data: unknown): RateLimit | undefined {
   const rateLimit = asObject(asObject(data)?.rateLimit);
