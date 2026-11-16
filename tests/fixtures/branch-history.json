@@ -1,0 +1,47 @@
+{
+  "data": {
+    "repository": {
+      "refs": {
+        "pageInfo": { "hasNextPage": false, "endCursor": "refs-cursor-1" },
+        "nodes": [
+          {
+            "name": "main",
+            "target": {
+              "history": {
+                "pageInfo": { "hasNextPage": false, "endCursor": "main-cursor-1" },
+                "nodes": [
+                  { "oid": "aaa111", "authoredDate": "2024-01-10T15:00:00Z", "messageHeadline": "Add widget" },
+                  { "oid": "bbb222", "authoredDate": "2024-01-09T15:00:00Z", "messageHeadline": "Fix widget" }
+                ]
+              }
+            }
+          },
+          {
+            "name": "feature/login",
+            "target": {
+              "history": {
+                "pageInfo": { "hasNextPage": true, "endCursor": "feature-cursor-1" },
+                "nodes": [
+                  { "oid": "bbb222", "authoredDate": "2024-01-09T15:00:00Z", "messageHeadline": "Fix widget" },
+                  { "oid": "ccc333", "authoredDate": "2024-01-08T15:00:00Z", "messageHeadline": "" }
+                ]
+              }
+            }
+          },
+          { "name": "no-target", "target": null },
+          { "name": "not-a-commit", "target": {} },
+          {
+            "name": "bad-node",
+            "target": {
+              "history": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [{ "oid": "ddd444" }, null]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "rateLimit": { "remaining": 4980, "resetAt": "2024-01-11T13:00:00Z" }
+  }
+}

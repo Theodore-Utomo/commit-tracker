@@ -178,7 +178,7 @@ Never commit a token. Never put one in test fixtures.
 ```
 src/
   entrypoints/
-    background.ts            # Service worker: message router only
+    background.ts            # Service worker: constructs deps, registers listeners; no logic
     github-profile.content/  # Content script on github.com profile pages
       index.tsx              # Bootstrap: page detection, observers, mounts UI
       style.css
@@ -187,11 +187,14 @@ src/
       main.tsx
     popup/                   # Small status popup (optional)
   core/                      # Pure TypeScript. No chrome.*, no fetch, no DOM.
+    login.ts                 # LOGIN_PATTERN, shared by dom/ and services/
     types.ts                 # Commit, DayBucket, PrivacyMode, Contributions
     dedupe.ts
     privacy.ts               # Privacy policies (strategy pattern)
     aggregate.ts             # Group commits by local day, compute levels
     grid.ts                  # 53 × 7 grid layout math
+  storage/                   # Display preferences the page may read and write. No token.
+    preferences.ts           # alwaysShow, showAllBranches. WXT storage and core/ only; never services/
   services/                  # Used by the service worker
     github/
       client.ts              # GitHubClient interface + fetch implementation
@@ -200,6 +203,7 @@ src/
     cache/
       store.ts               # CacheStore interface + IndexedDB implementation
     settings.ts              # Typed wrapper over chrome.storage
+    handle-message.ts        # Per-message handlers, testable without Chrome
     contributions.ts         # Orchestrates one GET_CONTRIBUTIONS request
     concurrency.ts           # Small promise pool
   messaging/
@@ -211,6 +215,7 @@ src/
     Prompt.tsx
     Heatmap.tsx
     DayDetail.tsx
+    ErrorNotice.tsx          # One sentence and the fix buttons per ErrorCode
     Toggle.tsx
 tests/
   unit/                      # Vitest, mirrors src/core and src/services
@@ -221,7 +226,9 @@ Import rules:
 
 - `core/` imports nothing outside `core/`.
 - `services/` may import `core/` and `messaging/protocol.ts`.
-- `ui/` and `dom/` may import `core/` (types, grid math) and `messaging/`, never `services/`.
+- `storage/` may import WXT `storage` and `core/` only. It never imports `services/`.
+- `ui/` and `dom/` may import `core/` (types, grid math), `messaging/`, and `storage/`. They never import `services/`.
+- The profile content script may import `storage/`. It never imports `services/`. ESLint `no-restricted-imports` enforces that for the content script, `ui/`, and `dom/`.
 - `entrypoints/` wire things together and contain as little logic as possible.
 
 ---
@@ -253,11 +260,16 @@ The page (GitHub's DOM) is untrusted territory: other extensions and page script
 `services/` depends on interfaces, not implementations:
 
 ```ts
+// As built so far (services/github/client.ts). Every method takes the token and returns a
+// GitHubResult: { ok: true, data } or a GitHubFailure carrying an ErrorCode. Paged methods
+// return Page<T> = { items, truncated, failure? } and record each reply's rateLimit in a
+// RateBudget shared across the request; they stop paging once it reports fewer than 200 points.
 interface GitHubClient {
-  getViewerAndUser(login: string): Promise<ViewerAndUser>;
-  listRepos(login: string, mode: PrivacyMode): Promise<RepoRef[]>;
-  getBranchCommits(repo: RepoRef, author: AuthorFilter, since?: string): Promise<RawCommit[]>;
-  getMergedPrCommits(login: string, since?: string): Promise<RawCommit[]>;
+  getViewerAndUser(token: string, login: string): Promise<GitHubResult<ViewerAndUser>>;
+  listOwnerRepos(token: string, since: string, budget: RateBudget): Promise<GitHubResult<Page<RepoRef>>>;
+  listPublicRepos(token: string, login: string, since: string, budget: RateBudget): Promise<GitHubResult<Page<RepoRef>>>;
+  getBranchCommits(token: string, repo: RepoRef, author: { id: string } | { emails: readonly string[] }, since: string, budget: RateBudget): Promise<GitHubResult<Page<Commit>>>;
+  getMergedPrCommits(token: string, login: string, mergedSince: string, savedEmails: readonly string[], budget: RateBudget, prSearchQualifiers?: string): Promise<GitHubResult<Page<Commit>>>;
 }
 
 interface CacheStore {
@@ -275,16 +287,17 @@ All messages between the content script and the worker are declared in `messagin
 ```ts
 type Request =
   | { type: 'GET_CONTRIBUTIONS'; login: string }
-  | { type: 'CLEAR_CACHE' };
+  | { type: 'CLEAR_CACHE' }
+  | { type: 'OPEN_OPTIONS' }; // a content script cannot call runtime.openOptionsPage()
 
 type Response =
-  | { ok: true; data: Contributions }
-  | { ok: false; error: ErrorCode };
+  | { ok: true; data: Contributions | { cleared: true } | { opened: true } }
+  | { ok: false; error: ErrorCode; resetAt?: string }; // resetAt: ISO, only with RATE_LIMITED
 
 type ErrorCode = 'NO_TOKEN' | 'UNAUTHORIZED' | 'RATE_LIMITED' | 'NOT_FOUND' | 'NETWORK' | 'UNKNOWN';
 ```
 
-The worker's `onMessage` handler is a single `switch` on `type`, so TypeScript checks every case. Don't add untyped messages.
+The worker's `onMessage` listener in `background.ts` is a single `switch` on `type`, so TypeScript checks every case. It ignores messages whose `sender.id` is not the extension's own, calls the handler from `services/handle-message.ts`, passes the result to `sendResponse`, and returns `true`. It does not return a promise: WXT 0.20+ has no polyfill, so a returned promise depends on native Chrome support. A `type` it doesn't handle returns `false`. Don't add untyped messages. On the page side, `messaging/client.ts`'s `sendMessage` never rejects; a failed send or a missing reply becomes `UNKNOWN`.
 
 **Strategy pattern for privacy.**
 Each privacy mode is a policy object with the same interface:
@@ -292,10 +305,18 @@ Each privacy mode is a policy object with the same interface:
 ```ts
 interface PrivacyPolicy {
   mode: PrivacyMode; // 'owner' | 'publicPlusCounts' | 'publicOnly'
+  repoSource: 'viewerAffiliated' | 'userPublic';
+  authorId(ids: { viewerId: string; userId: string }): string;
+  useSavedEmails: boolean;
+  prSearchQualifiers: string; // '' or ' is:public'
   includeRepo(repo: RepoRef): boolean;
-  present(commit: Commit): Commit | CountOnly; // strips details when needed
+  present(commit: Commit): Commit | CountOnly | undefined; // strips details when needed
 }
 ```
+
+`resolveMode(viewerLogin, profileLogin)` returns `owner` or `publicOnly`. It compares logins with `toLowerCase()` and does not read `restrictedContributionsCount`. `publicPlusCounts` stays unselected. The pipeline reads `repoSource`, `authorId`, `useSavedEmails`, and `prSearchQualifiers` instead of branching on the mode name.
+
+`present` returns a new object built field by field (unknown fields are dropped), a `CountOnly` for a private commit the mode may only count, or `undefined` when the commit must be dropped (forks in every mode, private repos in `publicOnly`). Callers drop `undefined` before aggregating.
 
 `privacy.ts` exports `policyFor(mode)`. The pipeline never branches on mode itself, so a new mode means a new policy, not edits everywhere.
 
@@ -309,10 +330,10 @@ resolve mode → list repos → fetch (branches + PRs) → normalize → dedupe 
 Keep each step a named function in its own module, so the order is readable in `contributions.ts`.
 
 **Cache-aside with incremental sync.**
-`contributions.ts` reads the cache first. On a hit, it fetches only commits newer than `lastSync` (`since` on GraphQL `history`), merges them by SHA, and writes the cache back. The cache key is `{ viewerLogin, profileLogin, mode }`. Entries older than 24 hours trigger a refresh from `since = lastSync`; a full refetch happens only on "clear cache" or a schema version change.
+`contributions.ts` reads the cache first. On every hit it refetches from `max(gridStart, lastSync − 14 days)` and merges by SHA. There is no freshness window that skips GitHub. `lastSync` is the time the fetch started, captured before its first GraphQL call, not a commit date. Git's `since` filter compares commit dates, so the overlap catches a commit pushed after a newer one was cached. A commit pushed more than 14 days after its commit date is found only after Clear cache. The cache key is `{ viewerLogin, profileLogin, mode, schemaVersion: 1 }`, with both logins lowercased. A full refetch from the grid start happens on a miss, a schema version other than `1`, or Clear cache. A `partial: true` result is not written.
 
 **Request coalescing.**
-If two tabs ask for the same profile at once, share one in-flight promise (a `Map<key, Promise>` in the worker) instead of fetching twice.
+If two requests ask for the same viewer, profile, and mode at once, they share one in-flight promise. A token change or Clear cache drops that map and bumps a generation counter, and a write from a request that started under the previous generation does not land.
 
 **Bounded concurrency.**
 Fetch about 4 repos at a time with a small promise pool in `concurrency.ts`. Read `rateLimit { remaining resetAt }` from GraphQL responses. Below a threshold (e.g. 200 points), stop and return partial results with a flag rather than burning the whole quota.
@@ -324,7 +345,7 @@ Every GitHub selector and URL rule lives in `dom/github-page.ts`: `isProfilePage
 Manifest V3 can stop the worker at any time. Keep no important state in module variables between events; persist to `chrome.storage` or IndexedDB. The in-flight request map is the only exception, and losing it is harmless. For long fetches, keep the worker alive with a `chrome.runtime.connect` port from the content script, or return `true` from `onMessage` and respond asynchronously.
 
 **Typed errors, no throws across boundaries.**
-Services may throw internally, but the message handler catches everything and maps it to an `ErrorCode`. The UI shows a specific message per code (e.g. `NO_TOKEN` links to the options page; `RATE_LIMITED` shows the reset time).
+Services may throw internally, but the message handler catches everything and maps it to an `ErrorCode`. The UI shows a specific message per code (e.g. `NO_TOKEN` and `UNAUTHORIZED` show an "Open extension options" button that sends `OPEN_OPTIONS`; `RATE_LIMITED` shows the local reset time). `NETWORK`, `UNKNOWN`, and `RATE_LIMITED` also show "Try again". The options page opens in a tab (`manifest.open_in_tab` in `options/index.html`).
 
 ---
 
@@ -346,7 +367,7 @@ interface Commit {
 
 interface CountOnly { sha: string; authoredDate: string; private: true }
 
-interface DayBucket { date: string /* YYYY-MM-DD, viewer's local time */; count: number; commits?: Commit[] }
+interface DayBucket { date: string /* YYYY-MM-DD, viewer's local time */; count: number; commits?: (Commit | CountOnly)[] }
 
 interface Contributions {
   login: string;
@@ -366,11 +387,11 @@ interface Contributions {
 2. **Prompt (content script).** Mount the prompt with `createShadowRootUi` (`cssInjectionMode: 'ui'`) next to the graph. On accept, send `{ type: 'GET_CONTRIBUTIONS', login }`. If "always show" is saved in settings, skip the prompt. Show a loading state.
 3. **Privacy check (service worker).** Read the token from settings; if missing, respond `NO_TOKEN`. Query the viewer and the profile user (see queries below). Resolve the `PrivacyMode` and the matching `PrivacyPolicy`.
 4. **Fetch (service worker + cache + API).** Check the cache. List repos for the mode:
-   - `owner`: `viewer.repositories(affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER])`
+   - `owner`: `viewer.repositories(affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], isFork: false, orderBy: { field: PUSHED_AT, direction: DESC })`, stopping at the first repo pushed before `since` (the grid start, or `lastSync − 14 days` on a cache hit). `ownerAffiliations` defaults to `[OWNER, COLLABORATOR]`, which would leave out organization-owned repos.
    - others: `user.repositories(privacy: PUBLIC)` plus `repositoriesContributedTo`, plus private ones only if mode is `publicPlusCounts` and the token can see them
 
    Skip forks. For each repo, fetch every branch's history filtered by author, once with `author: { id }` and once with `author: { emails }` for the user's extra emails (owner mode only, since emails come from settings). Then fetch merged-PR commits to recover squash-merged work, keeping only commits authored by this user.
-5. **Combine (service worker).** Normalize to `Commit`, dedupe by SHA (prefer the `branch` source over `pr` when both exist), apply the policy, and group by `authoredDate` in the viewer's local time zone. Save the cache, then respond with `Contributions`.
+5. **Combine (service worker).** Normalize to `Commit`, dedupe by SHA (prefer the `branch` source over `pr` when both exist), apply the policy, and group by `authoredDate` in the viewer's local time zone. On a cache hit, stored commits are merged in first and days outside the current grid year are dropped. Save the cache when the result is complete, then respond with `Contributions`.
 6. **Render (content script).** Build the 53 × 7 grid starting on the Sunday about a year ago (`core/grid.ts`). Compute 5 color levels by quartile, like GitHub. Color with GitHub's CSS variables (e.g. `var(--contribution-default-bgColor-2)`); custom properties pass into the Shadow DOM, so light and dark mode match automatically. Add the toggle against the native graph and the click-a-day detail view (details only for commits the policy didn't strip). Label the graph "All commits across branches".
 
 ---
@@ -394,9 +415,8 @@ query ViewerAndUser($login: String!) {
 Branches and history for one repo (step 4):
 
 ```graphql
-query BranchCommits($owner: String!, $name: String!, $author: CommitAuthor!, $since: GitTimestamp, $refCursor: String) {
+query BranchCommits($owner: String!, $name: String!, $author: CommitAuthor!, $since: GitTimestamp!, $refCursor: String) {
   repository(owner: $owner, name: $name) {
-    isPrivate
     refs(refPrefix: "refs/heads/", first: 50, after: $refCursor) {
       pageInfo { hasNextPage endCursor }
       nodes {
@@ -421,12 +441,15 @@ Merged PR commits (step 4):
 ```graphql
 query MergedPrCommits($q: String!, $cursor: String) {
   search(query: $q, type: ISSUE, first: 25, after: $cursor) {
+    issueCount
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
+        number
         repository { owner { login } name isPrivate isFork }
         commits(first: 100) {
-          nodes { commit { oid authoredDate messageHeadline author { user { login } } } }
+          pageInfo { hasNextPage endCursor }
+          nodes { commit { oid authoredDate messageHeadline author { email user { login } } } }
         }
       }
     }
@@ -435,7 +458,7 @@ query MergedPrCommits($q: String!, $cursor: String) {
 }
 ```
 
-With `q = "author:<login> is:pr is:merged"`, plus `merged:>=<date>` for incremental syncs.
+When `commits.pageInfo.hasNextPage` is true, `PR_COMMITS` continues that pull request (`pullRequest(number:) { commits(first: 100, after: $cursor) }`). `q` is `author:<login> is:pr is:merged merged:>=<grid start>`, built from the login GitHub returned. A search `issueCount` above 1,000 sets the result partial, because GitHub search returns at most 1,000 hits. Incremental syncs narrow the same `merged:>=` date.
 
 Paginate any connection whose `pageInfo.hasNextPage` is true. The same commit appears on many branches, so expect heavy duplication before dedupe.
 
@@ -456,7 +479,7 @@ Paginate any connection whose `pageInfo.hasNextPage` is true. The same commit ap
 - TypeScript strict mode; no `any`. Prefer `type` unions over enums.
 - Pure functions in `core/`; side effects only in `services/` and entrypoints.
 - One GitHub selector module (`dom/github-page.ts`); no selectors anywhere else.
-- Never log the token or full API responses. Send the token only to `api.github.com`.
+- Never log the token, commit emails, or full API responses. Send the token only to `api.github.com`. Emails are sent only as GraphQL author filters, in owner mode, and are never copied onto a `Commit`.
 - Render user-provided text (commit messages, repo names) as text, never as HTML.
 - Small commits with conventional messages: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`.
 - When a design decision changes, update this file in the same commit.

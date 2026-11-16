@@ -56,7 +56,7 @@ Before a commit, run `pnpm typecheck`, `pnpm lint`, and `pnpm test -- --run`.
 
 ## Token
 
-Version 1 takes a personal access token on the options page. There is no backend and no client secret.
+Version 1 takes a personal access token on the options page. The same page can save extra commit emails, used only to find the viewer's own commits that are not linked to the GitHub account. There is no backend and no client secret.
 
 - **Classic token:** scopes `repo`, `read:org`, and `read:user`.
 - **Fine-grained token:** read-only Contents, Metadata, and Pull requests, for the repositories you want included. An organization may need to approve the token.

@@ -1,0 +1,52 @@
+.commit-tracker {
+  display: block;
+  margin: 16px 0;
+  color: var(--fgColor-default, canvastext);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 14px;
+}
+
+h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+p {
+  margin: 0 0 8px;
+}
+
+button {
+  font: inherit;
+}
+
+svg {
+  display: block;
+}
+
+h3 {
+  margin: 8px 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.toggle {
+  display: block;
+  margin: 0 0 8px;
+}
+
+rect.day {
+  cursor: pointer;
+}
+
+.error-notice button + button {
+  margin-left: 8px;
+}
+
+.day-detail ul {
+  max-height: 240px;
+  margin: 0;
+  padding-left: 20px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
