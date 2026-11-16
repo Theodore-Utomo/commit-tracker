@@ -3,10 +3,13 @@ import { localDay } from '../../core/aggregate';
 import type { Contributions } from '../../core/types';
 import { findContributionGraph, getProfileLogin } from '../../dom/github-page';
 import { sendMessage } from '../../messaging/client';
-import { KEEPALIVE_PORT, type KeepalivePing } from '../../messaging/protocol';
-import { getAlwaysShow } from '../../storage/preferences';
+import { type ErrorCode, KEEPALIVE_PORT, type KeepalivePing } from '../../messaging/protocol';
+import { getAlwaysShow, getShowAllBranches, setShowAllBranches } from '../../storage/preferences';
+import { DayDetail } from '../../ui/DayDetail';
+import { ErrorNotice, PARTIAL_TEXT } from '../../ui/ErrorNotice';
 import { Heatmap } from '../../ui/Heatmap';
 import { Prompt } from '../../ui/Prompt';
+import { Toggle } from '../../ui/Toggle';
 import './style.css';
 
 const PING_INTERVAL_MS = 20_000;
@@ -15,8 +18,15 @@ const PING: KeepalivePing = { type: 'PING' };
 type View =
   | { kind: 'idle' }
   | { kind: 'loading' }
-  | { kind: 'prompt'; loading: boolean; error?: string; resetAt?: string }
-  | { kind: 'heatmap'; contributions: Contributions; today: string };
+  | { kind: 'prompt'; loading: boolean }
+  | { kind: 'error'; error: ErrorCode; resetAt?: string }
+  | {
+      kind: 'heatmap';
+      contributions: Contributions;
+      today: string;
+      showAllBranches: boolean;
+      selectedDay?: string;
+    };
 
 /**
  * Holds a port to the worker open and pings it, because a Manifest V3 worker is only kept
@@ -65,6 +75,12 @@ export default defineContentScript({
     };
 
     document.addEventListener('turbo:load', start);
+    // Turbo snapshots the page before it leaves. Tearing down first keeps GitHub's graph
+    // visible in that snapshot, so a back navigation never restores it hidden.
+    document.addEventListener('turbo:before-cache', () => {
+      teardown();
+      teardown = () => {};
+    });
     start();
   },
 });
@@ -81,8 +97,54 @@ function setup(ctx: InstanceType<typeof ContentScriptContext>): () => void {
   let open = false;
   let stopKeepalive = (): void => {};
   let container: HTMLElement | undefined;
-  let ui: { mount: () => void; remove: () => void } | undefined;
+  let ui: { mount: () => void; remove: () => void; shadowHost: HTMLElement } | undefined;
   let view: View = { kind: 'idle' };
+  /** The GitHub graph this page set `hidden` on, so teardown can show it again. */
+  let hiddenGraph: HTMLElement | undefined;
+
+  /** Clears `hidden` on the graph this page hid. A graph GitHub hid itself is left alone. */
+  const restoreNativeGraph = (): void => {
+    if (hiddenGraph) {
+      hiddenGraph.hidden = false;
+    }
+    hiddenGraph = undefined;
+  };
+
+  /** Hides GitHub's graph while the heatmap is shown, and shows it otherwise. A missing graph is skipped. */
+  const showNativeGraph = (visible: boolean): void => {
+    if (visible) {
+      restoreNativeGraph();
+      return;
+    }
+    const graph = findContributionGraph(document);
+    // The fallback lookup can return a container that holds the heatmap. Hiding it would hide both.
+    if (!(graph instanceof HTMLElement) || graph === hiddenGraph || (ui && graph.contains(ui.shadowHost))) {
+      return;
+    }
+    restoreNativeGraph();
+    if (!graph.hidden) {
+      graph.hidden = true;
+      hiddenGraph = graph;
+    }
+  };
+
+  const setShowAll = (showAllBranches: boolean): void => {
+    if (!active || view.kind !== 'heatmap') {
+      return;
+    }
+    view = { ...view, showAllBranches };
+    showNativeGraph(!showAllBranches);
+    paint();
+    void setShowAllBranches(showAllBranches).catch(() => {});
+  };
+
+  const selectDay = (date: string): void => {
+    if (!active || view.kind !== 'heatmap') {
+      return;
+    }
+    view = { ...view, selectedDay: date };
+    paint();
+  };
 
   const paint = (): void => {
     if (!container) {
@@ -92,10 +154,29 @@ function setup(ctx: InstanceType<typeof ContentScriptContext>): () => void {
     render(
       <div class="commit-tracker">
         {loading && <p>Loading commits…</p>}
-        {view.kind === 'prompt' && (
-          <Prompt loading={view.loading} error={view.error} resetAt={view.resetAt} onAccept={() => void ask()} />
+        {view.kind === 'prompt' && <Prompt loading={view.loading} onAccept={() => void ask()} />}
+        {view.kind === 'error' && (
+          <ErrorNotice
+            error={view.error}
+            resetAt={view.resetAt}
+            onOpenOptions={() => void sendMessage({ type: 'OPEN_OPTIONS' })}
+            onRetry={() => void ask()}
+          />
         )}
-        {view.kind === 'heatmap' && <Heatmap contributions={view.contributions} today={view.today} />}
+        {view.kind === 'heatmap' && (
+          <>
+            <Toggle checked={view.showAllBranches} onChange={setShowAll} />
+            {view.showAllBranches && (
+              <>
+                <Heatmap contributions={view.contributions} today={view.today} onSelectDay={selectDay} />
+                {view.contributions.partial && <p>{PARTIAL_TEXT}</p>}
+                {view.selectedDay !== undefined && (
+                  <DayDetail date={view.selectedDay} day={view.contributions.days[view.selectedDay]} />
+                )}
+              </>
+            )}
+          </>
+        )}
       </div>,
       container,
     );
@@ -157,7 +238,10 @@ function setup(ctx: InstanceType<typeof ContentScriptContext>): () => void {
     stopKeepalive = holdWorkerAwake();
     const today = localDay(new Date().toISOString(), Intl.DateTimeFormat().resolvedOptions().timeZone);
     try {
-      const response = await sendMessage({ type: 'GET_CONTRIBUTIONS', login: sentFor });
+      const [response, showAllBranches] = await Promise.all([
+        sendMessage({ type: 'GET_CONTRIBUTIONS', login: sentFor }),
+        getShowAllBranches().catch(() => true),
+      ]);
       if (!active) {
         return;
       }
@@ -166,9 +250,9 @@ function setup(ctx: InstanceType<typeof ContentScriptContext>): () => void {
         return;
       }
       if (!response.ok) {
+        // An error leaves GitHub's graph as it is.
         view = {
-          kind: 'prompt',
-          loading: false,
+          kind: 'error',
           error: response.error,
           resetAt: response.error === 'RATE_LIMITED' ? response.resetAt : undefined,
         };
@@ -178,14 +262,15 @@ function setup(ctx: InstanceType<typeof ContentScriptContext>): () => void {
         return;
       }
       if (!('days' in response.data)) {
-        view = { kind: 'prompt', loading: false, error: 'UNKNOWN' };
+        view = { kind: 'error', error: 'UNKNOWN' };
         if (await ensureUi()) {
           paint();
         }
         return;
       }
-      view = { kind: 'heatmap', contributions: response.data, today };
+      view = { kind: 'heatmap', contributions: response.data, today, showAllBranches };
       if (await ensureUi()) {
+        showNativeGraph(!showAllBranches);
         paint();
       }
     } finally {
@@ -247,6 +332,7 @@ function setup(ctx: InstanceType<typeof ContentScriptContext>): () => void {
 
   return () => {
     active = false;
+    restoreNativeGraph();
     stopKeepalive();
     mutation.disconnect();
     intersection?.disconnect();

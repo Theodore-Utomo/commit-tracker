@@ -8,7 +8,16 @@ const CELL = 10;
 const GAP = 3;
 const STEP = CELL + GAP;
 
-export function Heatmap({ contributions, today }: { contributions: Contributions; today: string }) {
+export function Heatmap({
+  contributions,
+  today,
+  onSelectDay,
+}: {
+  contributions: Contributions;
+  today: string;
+  /** Called with the `YYYY-MM-DD` of a clicked square. */
+  onSelectDay: (date: string) => void;
+}) {
   const dates = gridDays(today);
   const levels = colorLevels(dates.map((date) => contributions.days[date]?.count ?? 0));
   const rects = [];
@@ -27,6 +36,8 @@ export function Heatmap({ contributions, today }: { contributions: Contributions
           width={CELL}
           height={CELL}
           fill={`var(--contribution-default-bgColor-${levels[index] ?? 0})`}
+          class="day"
+          onClick={() => onSelectDay(date)}
         />,
       );
     }

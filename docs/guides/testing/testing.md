@@ -82,9 +82,9 @@ Content script and worker (DevTools on a github.com profile, content-script cons
 
 6. With a valid token, scroll the graph half into view. The button `See commits across all branches` appears and no GraphQL request has been sent. Click it. The button is disabled and the shadow tree shows `Loading commits…`. On your own profile the heading `All commits across branches` then appears. On someone else's profile the same heading appears, and no private repository name or commit message is shown. Scrolling again adds nothing. The page's Network panel shows no `api.github.com` request; the service worker makes it.
 7. In the service worker's Network panel, after Accept (or as soon as the graph is half visible when Always show is on), the request is a POST to `https://api.github.com/graphql`. No console line anywhere shows the token, the Authorization header, or raw JSON.
-8. With no token saved, Accept shows `NO_TOKEN` and the button is enabled again. The service worker makes no request to `api.github.com`. Click Accept again. `NO_TOKEN` shows again, and the button is not left disabled.
-9. With an invalid token in storage, Accept shows `UNAUTHORIZED` and the button is enabled again.
-10. Open a profile, reload the extension at `chrome://extensions`, then scroll the old tab to the graph and click Accept. The shadow tree shows `UNKNOWN`, with no uncaught "Extension context invalidated" error.
+8. With no token saved, Accept shows `Add a token in the extension options.` and an `Open extension options` button, and draws no squares. The service worker makes no request to `api.github.com`.
+9. With an invalid token in storage, Accept shows `The saved token was rejected. Save a new one in the extension options.` and the same button.
+10. Open a profile, reload the extension at `chrome://extensions`, then scroll the old tab to the graph and click Accept. The shadow tree shows `Something went wrong. Try again.` and a `Try again` button, with no uncaught "Extension context invalidated" error.
 11. Navigate to a second profile inside GitHub before scrolling the first. Only the second profile's prompt appears, and no heatmap for the first one is left on the page.
 12. After `pnpm build`, `grep -c githubToken .output/chrome-mv3/content-scripts/*.js` and `grep -c api.github.com` on the same files both print `0`.
 
@@ -97,7 +97,22 @@ DevTools open on your own profile (content-script console context), and the serv
 3. On someone else's profile, click Accept. The heading `All commits across branches` appears. The service worker sends `ViewerAndUser`, then `PublicRepos`, `BranchCommits`, and `MergedPrCommits`. The search query contains `is:public`. No `OwnerRepos` query. A day that has only private commits stays the empty color. The heatmap does not show repository names or commit messages.
 4. Push one commit to three branches, then reload and accept again. The day's count goes up by exactly 1.
 5. A repository last pushed before the grid start is never named in a `BranchCommits` request.
-6. In an organization with SAML single sign-on and no active session, the heatmap still appears (never `UNKNOWN` or `RATE_LIMITED`), and the organization's repository names appear nowhere on the page.
+6. In an organization with SAML single sign-on and no active session, the heatmap still appears (never an error notice), and the organization's repository names appear nowhere on the page.
+
+### Graph interactions
+
+DevTools open on a github.com profile. Run the toggle and day steps on your own profile and on someone else's.
+
+1. Accept the prompt. The heatmap and a checked `Show commits from all branches` checkbox appear, and GitHub's own graph is hidden (`hidden` is set on it in the Elements panel; the node is still in the DOM).
+2. Uncheck the box. GitHub's graph reappears and the heatmap and day list are hidden; the checkbox stays. Reload and accept again: the box is still unchecked and GitHub's graph is showing. Check it again to restore the heatmap.
+3. Click a day with commits. On your own profile the list shows each commit as `<message> — <owner>/<name> (<branch>)`, without a branch for a commit found only through a pull request. On someone else's profile, no private repository name or message appears. Click an empty day: `No commits`. Clicking makes no new request in the service worker's Network panel.
+4. With no token saved, click `Open extension options`. The options page opens in a new tab, not a dialog. Save a token, reload the profile, and accept again.
+5. Open a profile URL for a login GitHub does not know (for example a deleted account). Accept shows `GitHub has no user with that login.` with no buttons.
+6. Offline mode in the page's DevTools does not reach the worker, which makes the fetch. Set the service worker offline instead (its DevTools → Network → Offline) and accept. `Could not reach GitHub. Try again.` appears with `Try again`. Go back online and click `Try again`: `Loading commits…`, then the heatmap.
+7. On any error, GitHub's graph stays visible.
+8. Accept on a profile, follow a link to another page, and press Back. GitHub's graph is never left hidden without the heatmap beside it.
+9. Before accepting, delete GitHub's calendar table (`.js-calendar-graph-table`) in the Elements panel, then accept. The heatmap and the checkbox still render and stay visible (the outer `.js-yearly-contributions` container that holds them is not hidden), toggling works, and the console shows no uncaught error.
+10. Push a commit whose headline is `<b>bold</b> & <img src=x>`, accept, and click its day. The line shows that literal text, the shadow root has no `<b>` or `<img>` element, and no request goes to `x`.
 
 ### Worker keepalive
 
@@ -109,8 +124,8 @@ DevTools open on your own profile (content-script console context), and the serv
 
 In a scratch build only (never commit it), raise `RATE_LIMIT_FLOOR` in `src/services/github/client.ts`:
 
-1. Above your remaining points: the shadow tree shows `RATE_LIMITED` and the reset time, and Accept is enabled again.
-2. A little below your remaining points, so the cutoff lands mid-fetch: the heatmap still appears, with no error code. The page does not say whether the count is partial. If the cutoff lands before any commit is kept, the shadow tree shows `RATE_LIMITED` instead. Reload and accept again. `since` is the grid start, or 14 days before the last complete fetch. It is not the start time of the partial run.
+1. Above your remaining points: the shadow tree shows `GitHub rate limit reached. It resets at <time>.`, with the reset in your local time, and a `Try again` button. No squares are drawn, and GitHub's graph stays visible.
+2. A little below your remaining points, so the cutoff lands mid-fetch: the heatmap still appears, followed by `Results are incomplete because the rate limit was close.` If the cutoff lands before any commit is kept, the shadow tree shows the rate-limit sentence instead. Reload and accept again. `since` is the grid start, or 14 days before the last complete fetch. It is not the start time of the partial run.
 
 ### Cache
 

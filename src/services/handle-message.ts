@@ -164,3 +164,16 @@ export async function handleClearCache(cache: CacheStore): Promise<Response> {
     return { ok: false, error: 'UNKNOWN' };
   }
 }
+
+/**
+ * Answers `OPEN_OPTIONS`. A content script cannot open the options page, so the worker does.
+ * A rejection, or a throw before the promise exists, is `UNKNOWN`.
+ */
+export async function handleOpenOptions(deps: { openOptionsPage: () => Promise<void> }): Promise<Response> {
+  try {
+    await deps.openOptionsPage();
+    return { ok: true, data: { opened: true } };
+  } catch {
+    return { ok: false, error: 'UNKNOWN' };
+  }
+}

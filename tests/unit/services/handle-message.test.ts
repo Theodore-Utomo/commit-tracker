@@ -4,7 +4,12 @@ import type { CacheEntry, CacheStore } from '../../../src/services/cache/store';
 import type { ContributionsDeps, getContributions } from '../../../src/services/contributions';
 import type { GitHubClient } from '../../../src/services/github/client';
 import type { Viewer } from '../../../src/services/github/mappers';
-import { handleClearCache, handleGetContributions, onTokenChanged } from '../../../src/services/handle-message';
+import {
+  handleClearCache,
+  handleGetContributions,
+  handleOpenOptions,
+  onTokenChanged,
+} from '../../../src/services/handle-message';
 
 const request: GetContributionsRequest = { type: 'GET_CONTRIBUTIONS', login: 'octocat' };
 
@@ -479,5 +484,28 @@ describe('in-flight requests and clear cache', () => {
     await handleGetContributions(request, deps);
     expect(client.listOwnerRepos).toHaveBeenCalledTimes(2);
     expect(client.listOwnerRepos.mock.calls[1]?.[1]).toBe(SINCE);
+  });
+});
+
+describe('handleOpenOptions', () => {
+  it('opens the options page once and returns { opened: true }', async () => {
+    const openOptionsPage = vi.fn(async () => undefined);
+    await expect(handleOpenOptions({ openOptionsPage })).resolves.toEqual({ ok: true, data: { opened: true } });
+    expect(openOptionsPage).toHaveBeenCalledOnce();
+  });
+
+  it('returns UNKNOWN when opening the options page rejects', async () => {
+    const openOptionsPage = vi.fn(async () => {
+      throw new Error('Could not create an options page.');
+    });
+    await expect(handleOpenOptions({ openOptionsPage })).resolves.toEqual({ ok: false, error: 'UNKNOWN' });
+    expect(openOptionsPage).toHaveBeenCalledOnce();
+  });
+
+  it('returns UNKNOWN when openOptionsPage throws before returning a promise', async () => {
+    const openOptionsPage = (): Promise<void> => {
+      throw new Error('Extension context invalidated.');
+    };
+    await expect(handleOpenOptions({ openOptionsPage })).resolves.toEqual({ ok: false, error: 'UNKNOWN' });
   });
 });

@@ -2,7 +2,12 @@ import { isRequest, KEEPALIVE_PORT } from '../messaging/protocol';
 import { createCacheStore } from '../services/cache/store';
 import type { ContributionsDeps } from '../services/contributions';
 import { createGitHubClient } from '../services/github/client';
-import { handleClearCache, handleGetContributions, onTokenChanged } from '../services/handle-message';
+import {
+  handleClearCache,
+  handleGetContributions,
+  handleOpenOptions,
+  onTokenChanged,
+} from '../services/handle-message';
 import { getCommitEmails, getToken, watchToken } from '../services/settings';
 
 export default defineBackground(() => {
@@ -31,6 +36,11 @@ export default defineBackground(() => {
         return true;
       case 'CLEAR_CACHE':
         void handleClearCache(cache)
+          .catch(() => ({ ok: false, error: 'UNKNOWN' }) as const)
+          .then(sendResponse);
+        return true;
+      case 'OPEN_OPTIONS':
+        void handleOpenOptions({ openOptionsPage: () => browser.runtime.openOptionsPage() })
           .catch(() => ({ ok: false, error: 'UNKNOWN' }) as const)
           .then(sendResponse);
         return true;

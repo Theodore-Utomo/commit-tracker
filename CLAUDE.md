@@ -193,8 +193,8 @@ src/
     privacy.ts               # Privacy policies (strategy pattern)
     aggregate.ts             # Group commits by local day, compute levels
     grid.ts                  # 53 × 7 grid layout math
-  storage/                   # Display preferences the page may read. No token.
-    preferences.ts           # alwaysShow. WXT storage and core/ only; never services/
+  storage/                   # Display preferences the page may read and write. No token.
+    preferences.ts           # alwaysShow, showAllBranches. WXT storage and core/ only; never services/
   services/                  # Used by the service worker
     github/
       client.ts              # GitHubClient interface + fetch implementation
@@ -215,6 +215,7 @@ src/
     Prompt.tsx
     Heatmap.tsx
     DayDetail.tsx
+    ErrorNotice.tsx          # One sentence and the fix buttons per ErrorCode
     Toggle.tsx
 tests/
   unit/                      # Vitest, mirrors src/core and src/services
@@ -286,10 +287,11 @@ All messages between the content script and the worker are declared in `messagin
 ```ts
 type Request =
   | { type: 'GET_CONTRIBUTIONS'; login: string }
-  | { type: 'CLEAR_CACHE' };
+  | { type: 'CLEAR_CACHE' }
+  | { type: 'OPEN_OPTIONS' }; // a content script cannot call runtime.openOptionsPage()
 
 type Response =
-  | { ok: true; data: Contributions | { cleared: true } }
+  | { ok: true; data: Contributions | { cleared: true } | { opened: true } }
   | { ok: false; error: ErrorCode; resetAt?: string }; // resetAt: ISO, only with RATE_LIMITED
 
 type ErrorCode = 'NO_TOKEN' | 'UNAUTHORIZED' | 'RATE_LIMITED' | 'NOT_FOUND' | 'NETWORK' | 'UNKNOWN';
@@ -343,7 +345,7 @@ Every GitHub selector and URL rule lives in `dom/github-page.ts`: `isProfilePage
 Manifest V3 can stop the worker at any time. Keep no important state in module variables between events; persist to `chrome.storage` or IndexedDB. The in-flight request map is the only exception, and losing it is harmless. For long fetches, keep the worker alive with a `chrome.runtime.connect` port from the content script, or return `true` from `onMessage` and respond asynchronously.
 
 **Typed errors, no throws across boundaries.**
-Services may throw internally, but the message handler catches everything and maps it to an `ErrorCode`. The UI shows a specific message per code (e.g. `NO_TOKEN` links to the options page; `RATE_LIMITED` shows the reset time).
+Services may throw internally, but the message handler catches everything and maps it to an `ErrorCode`. The UI shows a specific message per code (e.g. `NO_TOKEN` and `UNAUTHORIZED` show an "Open extension options" button that sends `OPEN_OPTIONS`; `RATE_LIMITED` shows the local reset time). `NETWORK`, `UNKNOWN`, and `RATE_LIMITED` also show "Try again". The options page opens in a tab (`manifest.open_in_tab` in `options/index.html`).
 
 ---
 

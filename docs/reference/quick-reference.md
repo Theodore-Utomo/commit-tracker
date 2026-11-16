@@ -8,11 +8,11 @@ Condensed rules for agents. [CLAUDE.md](../../CLAUDE.md) is the source of truth.
 | --- | --- |
 | Commit types, dedupe, privacy policy, day aggregation, grid math | `src/core/`. Pure functions. No `browser`, no `fetch`, no DOM. |
 | GitHub client, IndexedDB cache, settings, the contributions pipeline | `src/services/`. Only the service worker calls these. |
-| Display preferences the page may read (`alwaysShow`) | `src/storage/`. WXT `storage` and `src/core/` only. No token and no `src/services/`. |
+| Display preferences the page may read and write (`alwaysShow`, `showAllBranches`) | `src/storage/`. WXT `storage` and `src/core/` only. No token and no `src/services/`. |
 | Message and response types | `src/messaging/protocol.ts` |
 | `sendMessage` helpers for the content script | `src/messaging/client.ts` |
 | GitHub selectors and profile-page detection | `src/dom/github-page.ts` only |
-| Prompt, heatmap, day detail, toggle | `src/ui/`, rendered with Preact inside `createShadowRootUi` |
+| Prompt, heatmap, day detail, toggle, error notice | `src/ui/`, rendered with Preact inside `createShadowRootUi` |
 | Service worker, content script, options page, popup | `src/entrypoints/`. Wire dependencies here. Almost no logic. |
 
 ## Import rules
