@@ -270,6 +270,7 @@ interface GitHubClient {
   listPublicRepos(token: string, login: string, since: string, budget: RateBudget): Promise<GitHubResult<Page<RepoRef>>>;
   getBranchCommits(token: string, repo: RepoRef, author: { id: string } | { emails: readonly string[] }, since: string, budget: RateBudget): Promise<GitHubResult<Page<Commit>>>;
   getMergedPrCommits(token: string, login: string, mergedSince: string, savedEmails: readonly string[], budget: RateBudget, prSearchQualifiers?: string): Promise<GitHubResult<Page<Commit>>>;
+  getRepoStates(token: string, repos: readonly RepoRef[], budget: RateBudget): Promise<GitHubResult<Page<RepoState>>>; // RepoState = { checked, current: RepoRef | null }
 }
 
 interface CacheStore {
@@ -330,10 +331,12 @@ resolve mode → list repos → fetch (branches + PRs) → normalize → dedupe 
 Keep each step a named function in its own module, so the order is readable in `contributions.ts`.
 
 **Cache-aside with incremental sync.**
-`contributions.ts` reads the cache first. On every hit it refetches from `max(gridStart, lastSync − 14 days)` and merges by SHA. There is no freshness window that skips GitHub. `lastSync` is the time the fetch started, captured before its first GraphQL call, not a commit date. Git's `since` filter compares commit dates, so the overlap catches a commit pushed after a newer one was cached. A commit pushed more than 14 days after its commit date is found only after Clear cache. The cache key is `{ viewerLogin, profileLogin, mode, schemaVersion: 1 }`, with both logins lowercased. A full refetch from the grid start happens on a miss, a schema version other than `1`, or Clear cache. A `partial: true` result is not written.
+`contributions.ts` reads the cache first. On every hit it refetches from `max(gridStart, lastSync − 14 days)` and merges by SHA. There is no freshness window that skips GitHub. `lastSync` is the time the fetch started, captured before its first GraphQL call, not a commit date. Git's `since` filter compares commit dates, so the overlap catches a commit pushed after a newer one was cached. A commit pushed more than 14 days after its commit date is found only after Clear cache. The cache key is `{ viewerLogin, profileLogin, mode, schemaVersion: 1 }`, with both logins lowercased. Each entry also stores `emailsKey`, a SHA-256 of the sorted, lowercased saved emails (`''` when none were used; the addresses themselves are never stored). An entry whose `emailsKey` differs from the current one is a miss, so adding an email finds its older commits and removing one drops them. A full refetch from the grid start happens on a miss, a schema version other than `1`, an `emailsKey` change, or Clear cache. A `partial: true` result is not written.
+
+Stored commits carry the repository's visibility from when they were cached, and a repository can go private or be deleted later. On a hit, every repository behind a stored commit is checked before that commit is shown: a repository in this run's listing is current, and the rest are asked in batches of 50 with `getRepoStates` (aliased `repository(owner:, name:)` lookups, owners and names as variables). The stored commit takes the current `RepoRef` and goes through the policy again. A repository that comes back `null` with a `NOT_FOUND` or `FORBIDDEN` error drops its commits. A `null` with any other error (a timeout), or an alias that is missing or malformed, counts as not checked. One that could not be checked (a failure or a low budget) also drops them and marks the result partial, so it is not cached.
 
 **Request coalescing.**
-If two requests ask for the same viewer, profile, and mode at once, they share one in-flight promise. A token change or Clear cache drops that map and bumps a generation counter, and a write from a request that started under the previous generation does not land.
+If two requests ask for the same viewer, profile, and mode at once, they share one in-flight promise. A token change, a saved-email change, or Clear cache drops that map and bumps a generation counter, and a write from a request that started under the previous generation does not land.
 
 **Bounded concurrency.**
 Fetch about 4 repos at a time with a small promise pool in `concurrency.ts`. Read `rateLimit { remaining resetAt }` from GraphQL responses. Below a threshold (e.g. 200 points), stop and return partial results with a flag rather than burning the whole quota.
@@ -391,7 +394,7 @@ interface Contributions {
    - others: `user.repositories(privacy: PUBLIC)` plus `repositoriesContributedTo`, plus private ones only if mode is `publicPlusCounts` and the token can see them
 
    Skip forks. For each repo, fetch every branch's history filtered by author, once with `author: { id }` and once with `author: { emails }` for the user's extra emails (owner mode only, since emails come from settings). Then fetch merged-PR commits to recover squash-merged work, keeping only commits authored by this user.
-5. **Combine (service worker).** Normalize to `Commit`, dedupe by SHA (prefer the `branch` source over `pr` when both exist), apply the policy, and group by `authoredDate` in the viewer's local time zone. On a cache hit, stored commits are merged in first and days outside the current grid year are dropped. Save the cache when the result is complete, then respond with `Contributions`.
+5. **Combine (service worker).** Normalize to `Commit`, dedupe by SHA (prefer the `branch` source over `pr` when both exist), apply the policy, and group by `authoredDate` in the viewer's local time zone. On a cache hit, stored commits are re-checked against their repository's current visibility, merged in first, and days outside the current grid year are dropped. Save the cache when the result is complete, then respond with `Contributions`.
 6. **Render (content script).** Build the 53 × 7 grid starting on the Sunday about a year ago (`core/grid.ts`). Compute 5 color levels by quartile, like GitHub. Color with GitHub's CSS variables (e.g. `var(--contribution-default-bgColor-2)`); custom properties pass into the Shadow DOM, so light and dark mode match automatically. Add the toggle against the native graph and the click-a-day detail view (details only for commits the policy didn't strip). Label the graph "All commits across branches".
 
 ---

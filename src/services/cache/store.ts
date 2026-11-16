@@ -18,6 +18,12 @@ export interface CacheEntry {
   /** ISO time the fetch started. Not a commit date. */
   lastSync: string;
   schemaVersion: number;
+  /**
+   * SHA-256 of the saved emails the entry was fetched with, `''` when none were used. A different
+   * value reads as a miss, so an added email's older commits are found and a removed one's dropped.
+   * Older entries have no value and match only `''`.
+   */
+  emailsKey?: string;
 }
 
 export interface CacheStore {

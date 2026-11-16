@@ -5,7 +5,7 @@ import {
   mapBranchCommits,
   mapBranchHistory,
   mapContributedRepos,
-  mapMergedPrCommits,
+  mapMergedPrSearch,
   mapRateLimit,
   mapRepos,
   mapViewer,
@@ -259,7 +259,12 @@ describe('mapper validation', () => {
   });
 });
 
-describe('mapMergedPrCommits', () => {
+/** The search mapper over bare pull-request nodes, as one search page. */
+function mapMergedPrCommits(nodes: unknown[], profileLogin: string, savedEmails: readonly string[]) {
+  return mapMergedPrSearch({ search: { nodes } }, profileLogin, savedEmails, new Set())?.commits ?? [];
+}
+
+describe('mapMergedPrSearch commits', () => {
   const merged = JSON.parse(
     readFileSync(new URL('../../../fixtures/merged-pr-commits.json', import.meta.url), 'utf8'),
   ) as { data: { search: { nodes: unknown[] } } };

@@ -8,6 +8,7 @@ import {
   OWNER_REPOS,
   PR_COMMITS,
   PUBLIC_REPOS,
+  REPO_STATES_BATCH,
   VIEWER_AND_USER,
 } from '../../../../src/services/github/queries';
 
@@ -1103,5 +1104,108 @@ describe('GitHubClient.getBranchCommits author emails', () => {
     expect(calls[0]?.variables.author).toEqual(emails);
     expect(calls[1]?.variables.author).toEqual(emails);
     expect(calls[1]?.query).toBe(BRANCH_HISTORY);
+  });
+});
+
+describe('GitHubClient.getRepoStates', () => {
+  const named = (name: string): RepoRef => ({ owner: 'acme', name, isPrivate: false, isFork: false });
+  const state = (name: string, isPrivate: boolean) => ({ name, owner: { login: 'acme' }, isPrivate, isFork: false });
+
+  it('sends owners and names as variables and maps a null alias to null', async () => {
+    const { calls, client } = scripted([
+      {
+        data: { r0: state('open', true), r1: null, rateLimit: PLENTY },
+        errors: [{ type: 'NOT_FOUND', path: ['r1'] }],
+      },
+    ]);
+    const result = await client.getRepoStates(TOKEN, [named('open'), named('gone')], createRateBudget());
+
+    expect(calls[0]?.variables).toEqual({ o0: 'acme', n0: 'open', o1: 'acme', n1: 'gone' });
+    expect(calls[0]?.query).not.toContain('acme');
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        items: [
+          { checked: named('open'), current: { ...named('open'), isPrivate: true } },
+          { checked: named('gone'), current: null },
+        ],
+        truncated: false,
+      },
+    });
+  });
+
+  it('asks in batches of REPO_STATES_BATCH and stops when the budget runs low', async () => {
+    const repos = Array.from({ length: REPO_STATES_BATCH + 1 }, (_, i) => named(`r${i}`));
+    const first = Object.fromEntries(repos.slice(0, REPO_STATES_BATCH).map((r, i) => [`r${i}`, state(r.name, false)]));
+    const { calls, client } = scripted([{ data: { ...first, rateLimit: LOW } }]);
+    const result = await client.getRepoStates(TOKEN, repos, createRateBudget());
+
+    expect(calls).toHaveLength(1);
+    expect(result.ok && result.data.items).toHaveLength(REPO_STATES_BATCH);
+    expect(result.ok && result.data.truncated).toBe(true);
+  });
+
+  it('returns a first-batch failure, and a later one as truncated with the failure', async () => {
+    const failed = scripted([new Response('', { status: 401 })]);
+    await expect(failed.client.getRepoStates(TOKEN, [named('a')], createRateBudget())).resolves.toEqual({
+      ok: false,
+      error: 'UNAUTHORIZED',
+    });
+
+    const repos = Array.from({ length: REPO_STATES_BATCH + 1 }, (_, i) => named(`r${i}`));
+    const first = Object.fromEntries(repos.slice(0, REPO_STATES_BATCH).map((r, i) => [`r${i}`, state(r.name, false)]));
+    const later = scripted([{ data: { ...first, rateLimit: PLENTY } }, new Response('', { status: 500 })]);
+    const result = await later.client.getRepoStates(TOKEN, repos, createRateBudget());
+    expect(result).toMatchObject({ ok: true, data: { truncated: true, failure: { ok: false, error: 'NETWORK' } } });
+    expect(result.ok && result.data.items).toHaveLength(REPO_STATES_BATCH);
+  });
+
+  it('leaves an alias unchecked when its error is not NOT_FOUND or FORBIDDEN', async () => {
+    const { client } = scripted([
+      {
+        data: { r0: null, r1: null, r2: state('kept', false), rateLimit: PLENTY },
+        errors: [
+          { type: 'FORBIDDEN', path: ['r0'] },
+          { message: 'timeout', path: ['r1'] },
+        ],
+      },
+    ]);
+    const result = await client.getRepoStates(TOKEN, [named('saml'), named('slow'), named('kept')], createRateBudget());
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        items: [
+          { checked: named('saml'), current: null },
+          { checked: named('kept'), current: named('kept') },
+        ],
+        truncated: true,
+      },
+    });
+  });
+
+  it('leaves a missing or malformed alias unchecked', async () => {
+    const { client } = scripted([{ data: { r0: { name: 'odd' }, rateLimit: PLENTY } }]);
+    const result = await client.getRepoStates(TOKEN, [named('odd'), named('absent')], createRateBudget());
+    expect(result).toEqual({ ok: true, data: { items: [], truncated: true } });
+  });
+
+  it('stops before the first batch when the budget is already low', async () => {
+    const budget = createRateBudget();
+    budget.record(LOW);
+    const { calls, client } = scripted([]);
+    await expect(client.getRepoStates(TOKEN, [named('a')], budget)).resolves.toEqual({
+      ok: true,
+      data: { items: [], truncated: true },
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('makes no request for an empty list', async () => {
+    const { calls, client } = scripted([]);
+    await expect(client.getRepoStates(TOKEN, [], createRateBudget())).resolves.toEqual({
+      ok: true,
+      data: { items: [], truncated: false },
+    });
+    expect(calls).toHaveLength(0);
   });
 });

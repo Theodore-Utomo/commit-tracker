@@ -6,6 +6,12 @@ export interface Viewer {
   id: string;
 }
 
+/** A repository as it was stored, and as GitHub reports it now. `null`: gone or hidden from the token. */
+export interface RepoState {
+  checked: RepoRef;
+  current: RepoRef | null;
+}
+
 /** The `rateLimit` block that every paged query selects. */
 export interface RateLimit {
   remaining: number;
@@ -92,6 +98,12 @@ export function mapViewerAndUser(data: unknown): ViewerAndUserMapped {
     status: 'ok',
     account: { viewer, user: { login: user.login, id: user.id }, restrictedContributionsCount: restricted },
   };
+}
+
+/** A repository as it was stored, and as GitHub reports it now. `null`: gone or hidden from the token. */
+export interface RepoState {
+  checked: RepoRef;
+  current: RepoRef | null;
 }
 
 /** The `rateLimit` block of a response's `data`, or `undefined` when absent or malformed. */
@@ -225,8 +237,8 @@ function emailSet(savedEmails: readonly string[]): Set<string> {
   return emails;
 }
 
-function repoFromPullRequest(node: Json | undefined): RepoRef | undefined {
-  const repository = asObject(node?.repository);
+/** A `{ name owner { login } isPrivate isFork }` node, or `undefined` when a field is missing. */
+function repoFromNode(repository: Json | undefined): RepoRef | undefined {
   const owner = asObject(repository?.owner)?.login;
   if (
     repository === undefined ||
@@ -307,7 +319,7 @@ function walkPullRequests(
       continue;
     }
     const node = asObject(nodes[index]);
-    const repo = repoFromPullRequest(node);
+    const repo = repoFromNode(asObject(node?.repository));
     if (node === undefined || repo === undefined) {
       continue;
     }
@@ -319,14 +331,6 @@ function walkPullRequests(
     }
   }
   return { commits, followUps };
-}
-
-/**
- * Maps pull-request search nodes to commits. `source` is `'pr'` and `branch` is omitted.
- * A node with no repository is skipped; forks are kept for `includeRepo` to drop.
- */
-export function mapMergedPrCommits(nodes: unknown, profileLogin: string, savedEmails: readonly string[]): Commit[] {
-  return walkPullRequests(asArray(nodes), profileLogin, emailSet(savedEmails), new Set()).commits;
 }
 
 /** Maps one `MERGED_PR_COMMITS` page. Returns `undefined` when the search connection is missing. */
@@ -363,4 +367,22 @@ export function mapPrCommitPage(
     commits: mapPullRequestCommitNodes(asArray(connection.nodes), repo, profileLogin, emailSet(savedEmails)),
     nextCursor: nextCursorOf(connection),
   };
+}
+
+/**
+ * Maps a `repoStatesQuery` reply for `batch`, in order. An explicit `null` alias is `null`: the
+ * repository is gone or hidden from the token. A missing or malformed alias is left out, so the
+ * caller treats that repository as not checked rather than gone.
+ */
+export function mapRepoStates(data: unknown, batch: readonly RepoRef[]): RepoState[] {
+  const root = asObject(data);
+  const states: RepoState[] = [];
+  batch.forEach((checked, i) => {
+    const node = root?.[`r${i}`];
+    const current = node === null ? null : repoFromNode(asObject(node));
+    if (current !== undefined) {
+      states.push({ checked, current });
+    }
+  });
+  return states;
 }

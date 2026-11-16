@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
-import { getCommitEmails, getToken, hasToken, setCommitEmails, setToken, watchToken } from '../../../src/services/settings';
+import {
+  getCommitEmails,
+  getToken,
+  hasToken,
+  setCommitEmails,
+  setToken,
+  watchCommitEmails,
+  watchToken,
+} from '../../../src/services/settings';
 
 describe('token settings', () => {
   beforeEach(() => {
@@ -53,6 +61,19 @@ describe('token settings', () => {
 describe('commit emails', () => {
   beforeEach(() => {
     fakeBrowser.reset();
+  });
+
+  it('watchCommitEmails runs when the emails change, passes nothing on, and ignores the token', async () => {
+    const seen: unknown[][] = [];
+    watchCommitEmails((...args) => {
+      seen.push(args);
+    });
+
+    await setCommitEmails(['dev@example.com']);
+    await setToken('ghp_example');
+    await setCommitEmails([]);
+
+    expect(seen).toEqual([[], []]);
   });
 
   it('defaults to an empty list', async () => {

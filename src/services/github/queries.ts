@@ -135,3 +135,24 @@ export const BRANCH_HISTORY = `query BranchHistory($owner: String!, $name: Strin
   }
   rateLimit { remaining resetAt }
 }`;
+
+/** Repositories looked up in one `repoStatesQuery` request. */
+export const REPO_STATES_BATCH = 50;
+
+/**
+ * The current visibility of `count` repositories, one alias each (`r0`, `r1`, ...). Owners and
+ * names arrive as variables (`$o0`, `$n0`, ...), never in the query text. A repository that is
+ * gone or hidden from the token comes back `null`.
+ */
+export function repoStatesQuery(count: number): string {
+  const variables: string[] = [];
+  const fields: string[] = [];
+  for (let i = 0; i < count; i += 1) {
+    variables.push(`$o${i}: String!, $n${i}: String!`);
+    fields.push(`  r${i}: repository(owner: $o${i}, name: $n${i}) { name owner { login } isPrivate isFork }`);
+  }
+  return `query RepoStates(${variables.join(', ')}) {
+${fields.join('\n')}
+  rateLimit { remaining resetAt }
+}`;
+}
